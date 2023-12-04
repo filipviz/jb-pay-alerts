@@ -363,12 +363,13 @@ func getMetadataForUri(uri string) (*Metadata, error) {
 func createPlaceholderCacheValue(p PayEvent) MetadataCacheValue {
 	metadata := new(Metadata)
 	metadata.Name = fmt.Sprintf("Project %d", p.ProjectId)
-	// No straightforward way to get the project link for pv 1 projects if you don't have the metadata.
-	// If this becomes a problem, we can get the handles from the contract.
 	projectLink := ""
 	if p.Pv == "2" {
 		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
-	}
+	} else if p.Pv == "1" {
+    metadata.Name += "(v1)"
+    projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Project.Handle)
+  }
 	metadata.InfoUri = projectLink
 
 	return MetadataCacheValue{
