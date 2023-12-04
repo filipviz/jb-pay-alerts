@@ -1,4 +1,4 @@
-module juicecrowd-bot
+module jb-pay-alerts
 
 go 1.21.4
 

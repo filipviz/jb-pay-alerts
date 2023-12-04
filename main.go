@@ -265,7 +265,7 @@ func sendPayEventToDiscord(p PayEvent, channels []string, m Metadata, s *discord
 }
 
 func formatPayEvent(p PayEvent, m Metadata) *discordgo.MessageEmbed {
-	fields := make([]*discordgo.MessageEmbedField, 0, 5)
+	fields := make([]*discordgo.MessageEmbedField, 0, 4)
 	if p.Note != "" {
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Note",
@@ -275,8 +275,8 @@ func formatPayEvent(p PayEvent, m Metadata) *discordgo.MessageEmbed {
 	}
 
 	if p.Amount != "" && p.AmountUSD != "" {
-		amountStr, err := parseFixedDecimalString(p.Amount, 18, -1)
-		amountUsdStr, usdErr := parseFixedDecimalString(p.AmountUSD, 18, 2)
+		amountStr, err := parseFixedPointString(p.Amount, 18, -1)
+		amountUsdStr, usdErr := parseFixedPointString(p.AmountUSD, 18, 2)
 		if err == nil && usdErr == nil {
 			fields = append(fields, &discordgo.MessageEmbedField{
 				Name:   "Amount",
@@ -327,7 +327,7 @@ func formatPayEvent(p PayEvent, m Metadata) *discordgo.MessageEmbed {
 	}
 }
 
-func parseFixedDecimalString(s string, decimals int64, precision int) (string, error) {
+func parseFixedPointString(s string, decimals int64, precision int) (string, error) {
 	bf, ok := new(big.Float).SetString(s)
 	if !ok {
 		return "", fmt.Errorf("error parsing fixed decimal string: %s", s)
@@ -363,8 +363,8 @@ func getMetadataForUri(uri string) (*Metadata, error) {
 func createPlaceholderCacheValue(p PayEvent) MetadataCacheValue {
 	metadata := new(Metadata)
 	metadata.Name = fmt.Sprintf("Project %d", p.ProjectId)
-	// No straightforward way to get the project link for pv 1 projects.
-	// If this becomes a problem, we can add logic to get the project link.
+	// No straightforward way to get the project link for pv 1 projects if you don't have the metadata.
+	// If this becomes a problem, we can get the handles from the contract.
 	projectLink := ""
 	if p.Pv == "2" {
 		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
