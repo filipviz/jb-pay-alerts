@@ -122,7 +122,7 @@ func main() {
 				continue
 			}
 
-			if resp.Data.PayEvents != nil {
+			if len(resp.Data.PayEvents) > 0 {
 				// If there are pay events, initialize a new discord session.
 				s, err := discordgo.New("Bot " + discordToken)
 				if err != nil {
