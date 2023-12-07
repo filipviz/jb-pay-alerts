@@ -130,7 +130,7 @@ func main() {
 					continue
 				}
 
-				s.LogLevel = discordgo.LogWarning
+				// s.LogLevel = discordgo.LogWarning
 				s.ShouldRetryOnRateLimit = true
 				if err = s.Open(); err != nil {
 					log.Printf("Failed to open discord session: %v\n", err)
