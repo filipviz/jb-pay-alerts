@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,7 +22,7 @@ import (
 
 const (
 	MINUTES_BETWEEN_CHECKS = 5
-	IPFS_ENDPOINT          = "https://ipfs.io/ipfs/"
+	IPFS_ENDPOINT          = "https://jbm.infura-ipfs.io/ipfs/"
 )
 
 type GraphQLRequest struct {
@@ -342,10 +343,20 @@ func parseFixedPointString(s string, decimals int64, precision int) (string, err
 
 func getMetadataForUri(uri string) (*Metadata, error) {
 	metadataUrl := getUrlFromUri(uri)
-	resp, err := http.Get(metadataUrl)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataUrl, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request to IPFS: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("error getting metadata from IPFS: %w", err)
 	}
+
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -367,9 +378,9 @@ func createPlaceholderCacheValue(p PayEvent) MetadataCacheValue {
 	if p.Pv == "2" {
 		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
 	} else if p.Pv == "1" {
-    metadata.Name += "(v1)"
-    projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Project.Handle)
-  }
+		metadata.Name += "(v1)"
+		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Project.Handle)
+	}
 	metadata.InfoUri = projectLink
 
 	return MetadataCacheValue{
@@ -414,6 +425,11 @@ func getEnsForAddress(address string) (string, error) {
 func getUrlFromUri(uri string) string {
 	// Check if the URI is already a URL.
 	if len(uri) >= 4 && uri[0:4] == "http" {
+		oldEndpoint := "https://jbx.mypinata.cloud/ipfs/"
+		if len(uri) >= len(oldEndpoint) && uri[0:len(oldEndpoint)] == oldEndpoint {
+			uri = IPFS_ENDPOINT + uri[len(oldEndpoint)-1:]
+		}
+
 		return uri
 	}
 
