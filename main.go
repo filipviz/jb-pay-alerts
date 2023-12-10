@@ -44,10 +44,28 @@ type PayEvent struct {
 	} `json:"project"`
 }
 
-type SubgraphResponse struct {
+type PayEventsResponse struct {
 	Data struct {
 		PayEvents []PayEvent `json:"payEvents"`
 	} `json:"data"`
+}
+
+type Project struct {
+	Pv          string `json:"pv"`
+	Handle      string `json:"handle"`
+	ProjectId   int    `json:"projectId"`
+	MetadataUri string `json:"metadataUri"`
+	Creator     string `json:"creator"`
+	Owner       string `json:"owner"`
+	InitEvents  []struct {
+		TxHash string `json:"txHash"`
+	} `json:"initEvents"`
+}
+
+type ProjectsResponse struct {
+	Data struct {
+		Projects []Project `json:"projects"`
+	}
 }
 
 type Metadata struct {
@@ -117,13 +135,19 @@ func main() {
 			currentTime := <-t.C
 			// Every 5 minutes, check the subgraph for new pay events.
 			// If there are new pay events, send them to the appropriate places.
-			resp, err := getPayEvents(previousTime, subgraphUrl)
+			payResp, err := getPayEvents(previousTime, subgraphUrl)
 			if err != nil {
 				log.Printf("Failed to get pay events: %v\n", err)
 				continue
 			}
 
-			if len(resp.Data.PayEvents) > 0 {
+			projResp, err := getNewProjects(previousTime, subgraphUrl)
+			if err != nil {
+				log.Printf("Failed to get new projects: %v\n", err)
+				continue
+			}
+
+			if len(payResp.Data.PayEvents) > 0 || len(projResp.Data.Projects) > 0 {
 				// If there are pay events, initialize a new discord session.
 				s, err := discordgo.New("Bot " + discordToken)
 				if err != nil {
@@ -140,61 +164,35 @@ func main() {
 					log.Println("Discord session opened")
 				}
 
-				for _, payEvent := range resp.Data.PayEvents {
+				for _, payEvent := range payResp.Data.PayEvents {
 					go func(p PayEvent) {
 						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
-						metadataCache.RLock()
-						cacheValue, exists := metadataCache.Map[projectIdStr]
-						metadataCache.RUnlock()
-						// If the metadata for this project is not in the cache, or the metadata IPFS URI has changed, update the cache.
-						if !exists || cacheValue.MetadataIPFSUri != p.Project.MetadataUri {
-							if p.Project.MetadataUri == "" {
-								// If there is no metadata URI, create placeholder metadata.
-								newCacheValue := createPlaceholderCacheValue(p)
-								cacheValue = newCacheValue
-								metadataCache.Lock()
-								metadataCache.Map[projectIdStr] = newCacheValue
-								metadataCache.Unlock()
-							} else {
-								// If there is a metadata URI, get the metadata from IPFS.
-								newMetadata, err := getMetadataForUri(p.Project.MetadataUri)
-								if err != nil {
-									log.Printf("Failed to get metadata for project %s: %v\n", projectIdStr, err)
-									if exists {
-										log.Printf("Using cached metadata for project %s.\n", projectIdStr)
-									} else {
-										log.Printf("No cached metadata. Creating placeholder metadata for project %s.\n", projectIdStr)
-										newCacheValue := createPlaceholderCacheValue(p)
-										cacheValue = newCacheValue
-										metadataCache.Lock()
-										metadataCache.Map[projectIdStr] = newCacheValue
-										metadataCache.Unlock()
-									}
-								} else {
-									newCacheValue := MetadataCacheValue{
-										MetadataIPFSUri: p.Project.MetadataUri,
-										Metadata:        *newMetadata,
-									}
-									cacheValue = newCacheValue
-									metadataCache.Lock()
-									metadataCache.Map[projectIdStr] = newCacheValue
-									metadataCache.Unlock()
-								}
-							}
-						}
+						metadata := getAndUpdateMetadataFromCache(&metadataCache, projectIdStr, p.Project.MetadataUri, p.Project.Handle, p.Pv)
 
 						// Check for wildcard channels, and notify them if they exist.
 						wChannels, wExists := projectsToChannels["*"]
 						if wExists {
-							go sendPayEventToDiscord(p, wChannels, cacheValue.Metadata, s)
+							go sendPayEventToDiscord(p, wChannels, metadata, s)
 						}
 
 						// Check for channels for this project, and notify them if they exist.
 						pChannels, pExists := projectsToChannels[projectIdStr]
 						if pExists {
-							go sendPayEventToDiscord(p, pChannels, cacheValue.Metadata, s)
+							go sendPayEventToDiscord(p, pChannels, metadata, s)
 						}
 					}(payEvent)
+				}
+
+				for _, newProject := range projResp.Data.Projects {
+					go func(p Project) {
+						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
+						metadata := getAndUpdateMetadataFromCache(&metadataCache, projectIdStr, p.MetadataUri, p.Handle, p.Pv)
+
+						channels, exists := projectsToChannels["new"]
+						if exists {
+							go sendNewProjectToDiscord(p, channels, metadata, s)
+						}
+					}(newProject)
 				}
 			}
 
@@ -209,7 +207,7 @@ func main() {
 }
 
 // Get the pay events from the Subgraph URL since the given time.
-func getPayEvents(since time.Time, subgraphUrl string) (*SubgraphResponse, error) {
+func getPayEvents(since time.Time, subgraphUrl string) (*PayEventsResponse, error) {
 	reqBody := GraphQLRequest{
 		Query: `{
 			payEvents(
@@ -248,12 +246,57 @@ func getPayEvents(since time.Time, subgraphUrl string) (*SubgraphResponse, error
 		return nil, fmt.Errorf("error reading subgraph response body: %w", err)
 	}
 
-	var s SubgraphResponse
-	if err = json.Unmarshal(respBody, &s); err != nil {
+	var p PayEventsResponse
+	if err = json.Unmarshal(respBody, &p); err != nil {
 		return nil, fmt.Errorf("error unmarshalling response body: %w", err)
 	}
 
-	return &s, nil
+	return &p, nil
+}
+
+func getNewProjects(since time.Time, subgraphUrl string) (*ProjectsResponse, error) {
+	reqBody := GraphQLRequest{
+		Query: `{
+			projects(
+			  first: 1000
+			  orderBy: createdAt
+			  orderDirection: desc
+			  where: {createdAt_gt:` +
+			fmt.Sprintf("%d", since.Unix()) +
+			`}
+			) {
+			  pv
+			  handle
+			  projectId
+			  metadataUri
+			  creator
+			  owner    
+			  initEvents(first: 1, orderBy: timestamp, orderDirection: asc) {
+				txHash
+			  }
+			}
+		  }`,
+	}
+	reqBodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling request body: %w", err)
+	}
+	resp, err := http.Post(subgraphUrl, "application/json", bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("error posting request to subgraph: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading subgraph response body: %w", err)
+	}
+
+	var p ProjectsResponse
+	if err = json.Unmarshal(respBody, &p); err != nil {
+		return nil, fmt.Errorf("error unmarshalling response body: %w", err)
+	}
+
+	return &p, nil
 }
 
 func sendPayEventToDiscord(p PayEvent, channels []string, m Metadata, s *discordgo.Session) {
@@ -262,6 +305,80 @@ func sendPayEventToDiscord(p PayEvent, channels []string, m Metadata, s *discord
 		if err != nil {
 			log.Printf("Failed to send message to channel %s: %v\n", channel, err)
 		}
+	}
+}
+
+func sendNewProjectToDiscord(p Project, channels []string, m Metadata, s *discordgo.Session) {
+	for _, channel := range channels {
+		_, err := s.ChannelMessageSendEmbed(channel, formatProjectMessage(p, m))
+		if err != nil {
+			log.Printf("Failed to send message to channel %s: %v\n", channel, err)
+		}
+	}
+}
+
+func formatProjectMessage(p Project, m Metadata) *discordgo.MessageEmbed {
+	fields := make([]*discordgo.MessageEmbedField, 0, 4)
+
+	if m.ProjectTagline != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Tagline",
+			Value:  m.ProjectTagline,
+			Inline: false,
+		})
+	}
+
+	if p.Creator != "" {
+		var creator string
+		if ensName, err := getEnsForAddress(p.Creator); err == nil {
+			creator = ensName
+		} else {
+			creator = p.Creator
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Creator",
+			Value:  fmt.Sprintf("[%s](https://juicebox.money/account/%s)", creator, p.Creator),
+			Inline: true,
+		})
+	}
+
+	if p.Creator != p.Owner {
+		var owner string
+		if ensName, err := getEnsForAddress(p.Owner); err == nil {
+			owner = ensName
+		} else {
+			owner = p.Owner
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Owner",
+			Value:  fmt.Sprintf("[%s](https://juicebox.money/account/%s)", owner, p.Owner),
+			Inline: true,
+		})
+	}
+
+	if len(p.InitEvents) != 0 && p.InitEvents[0].TxHash != "" {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Transaction",
+			Value:  fmt.Sprintf("[Etherscan](https://etherscan.io/tx/%s)", p.InitEvents[0].TxHash),
+			Inline: true,
+		})
+	}
+
+	projectLink := ""
+	if p.Pv == "2" {
+		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
+	} else if p.Pv == "1" {
+		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Handle)
+	}
+
+	return &discordgo.MessageEmbed{
+		Title:     fmt.Sprintf("New project: %s", m.Name),
+		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		URL:       projectLink,
+		Color:     rand.Intn(0xffffff + 1),
+		Fields:    fields,
 	}
 }
 
@@ -371,24 +488,6 @@ func getMetadataForUri(uri string) (*Metadata, error) {
 	return &m, nil
 }
 
-func createPlaceholderCacheValue(p PayEvent) MetadataCacheValue {
-	metadata := new(Metadata)
-	metadata.Name = fmt.Sprintf("Project %d", p.ProjectId)
-	projectLink := ""
-	if p.Pv == "2" {
-		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
-	} else if p.Pv == "1" {
-		metadata.Name += "(v1)"
-		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Project.Handle)
-	}
-	metadata.InfoUri = projectLink
-
-	return MetadataCacheValue{
-		MetadataIPFSUri: "",
-		Metadata:        *metadata,
-	}
-}
-
 type ENSResponse struct {
 	Name string `json:"name"`
 }
@@ -439,4 +538,66 @@ func getUrlFromUri(uri string) string {
 	}
 
 	return IPFS_ENDPOINT + uri
+}
+
+func getAndUpdateMetadataFromCache(m *MetadataCache, projectId string, metadataUri string, handle string, pv string) Metadata {
+	m.RLock()
+	cacheValue, exists := m.Map[projectId]
+	m.RUnlock()
+	// If the metadata for this project is not in the cache, or the metadata IPFS URI has changed, update the cache.
+	if !exists || cacheValue.MetadataIPFSUri != metadataUri {
+		if metadataUri == "" {
+			// If there is no metadata URI, create placeholder metadata.
+			newCacheValue := createPlaceholderCacheValue(projectId, handle, pv)
+			cacheValue = newCacheValue
+			m.Lock()
+			m.Map[projectId] = newCacheValue
+			m.Unlock()
+		} else {
+			// If there is a metadata URI, get the metadata from IPFS.
+			newMetadata, err := getMetadataForUri(metadataUri)
+			if err != nil {
+				log.Printf("Failed to get metadata for project %s: %v\n", projectId, err)
+				if exists {
+					log.Printf("Using cached metadata for project %s.\n", projectId)
+				} else {
+					log.Printf("No cached metadata. Creating placeholder metadata for project %s.\n", projectId)
+					newCacheValue := createPlaceholderCacheValue(projectId, handle, pv)
+					cacheValue = newCacheValue
+					m.Lock()
+					m.Map[projectId] = newCacheValue
+					m.Unlock()
+				}
+			} else {
+				newCacheValue := MetadataCacheValue{
+					MetadataIPFSUri: metadataUri,
+					Metadata:        *newMetadata,
+				}
+				cacheValue = newCacheValue
+				m.Lock()
+				m.Map[projectId] = newCacheValue
+				m.Unlock()
+			}
+		}
+	}
+
+	return cacheValue.Metadata
+}
+
+func createPlaceholderCacheValue(projectId string, handle string, pv string) MetadataCacheValue {
+	metadata := new(Metadata)
+	metadata.Name = fmt.Sprintf("Project %s", projectId)
+	projectLink := ""
+	if pv == "2" {
+		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
+	} else if pv == "1" {
+		metadata.Name += "(v1)"
+		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", handle)
+	}
+	metadata.InfoUri = projectLink
+
+	return MetadataCacheValue{
+		MetadataIPFSUri: "",
+		Metadata:        *metadata,
+	}
 }
