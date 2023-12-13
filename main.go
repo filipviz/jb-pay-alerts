@@ -374,7 +374,7 @@ func formatProjectMessage(p Project, m Metadata) *discordgo.MessageEmbed {
 	}
 
 	return &discordgo.MessageEmbed{
-		Title:     fmt.Sprintf("New project: %s", m.Name),
+		Title:     fmt.Sprintf("🆕🆕🆕 NEW PROJECT: %s", m.Name),
 		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
 		URL:       projectLink,
 		Color:     rand.Intn(0xffffff + 1),
