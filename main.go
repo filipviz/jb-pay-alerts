@@ -568,12 +568,12 @@ func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, ha
 			newMetadata, err := getMetadataForUri(metadataUri)
 			if err != nil {
 				log.Printf("Failed to fetch metadata for project %s (using placeholder): %v\n", projectId, err)
-				close(cacheValue.ready)
 			} else {
 				cacheValue.Metadata = *newMetadata
-				close(cacheValue.ready)
 			}
 		}
+
+		close(cacheValue.ready)
 	} else {
 		m.Unlock()
 		<-cacheValue.ready
