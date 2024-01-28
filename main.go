@@ -79,11 +79,12 @@ type Metadata struct {
 type MetadataCacheValue struct {
 	MetadataIPFSUri string
 	Metadata        Metadata
+	ready           chan struct{} // Closed when metadata is ready.
 }
 
 type MetadataCache struct {
-	sync.RWMutex
-	Map map[string]MetadataCacheValue
+	sync.Mutex // Protects the map.
+	Map        map[string]*MetadataCacheValue
 }
 
 func main() {
@@ -121,7 +122,7 @@ func main() {
 
 	// Initialize the metadata cache (map of project IDs to `MetadataCacheValue`s)
 	metadataCache := MetadataCache{
-		Map: make(map[string]MetadataCacheValue),
+		Map: make(map[string]*MetadataCacheValue),
 	}
 
 	log.Println("Started.")
@@ -167,7 +168,7 @@ func main() {
 				for _, payEvent := range payResp.Data.PayEvents {
 					go func(p PayEvent) {
 						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
-						metadata := getAndUpdateMetadataFromCache(&metadataCache, projectIdStr, p.Project.MetadataUri, p.Project.Handle, p.Pv)
+						metadata := memoizedMetadata(&metadataCache, projectIdStr, p.Project.MetadataUri, p.Project.Handle, p.Pv)
 
 						// Check for wildcard channels, and notify them if they exist.
 						wChannels, wExists := projectsToChannels["*"]
@@ -186,7 +187,7 @@ func main() {
 				for _, newProject := range projResp.Data.Projects {
 					go func(p Project) {
 						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
-						metadata := getAndUpdateMetadataFromCache(&metadataCache, projectIdStr, p.MetadataUri, p.Handle, p.Pv)
+						metadata := memoizedMetadata(&metadataCache, projectIdStr, p.MetadataUri, p.Handle, p.Pv)
 
 						channels, exists := projectsToChannels["new"]
 						if exists {
@@ -540,64 +541,59 @@ func getUrlFromUri(uri string) string {
 	return IPFS_ENDPOINT + uri
 }
 
-func getAndUpdateMetadataFromCache(m *MetadataCache, projectId string, metadataUri string, handle string, pv string) Metadata {
-	m.RLock()
-	cacheValue, exists := m.Map[projectId]
-	m.RUnlock()
-	// If the metadata for this project is not in the cache, or the metadata IPFS URI has changed, update the cache.
-	if !exists || cacheValue.MetadataIPFSUri != metadataUri {
-		if metadataUri == "" {
-			// If there is no metadata URI, create placeholder metadata.
-			newCacheValue := createPlaceholderCacheValue(projectId, handle, pv)
-			cacheValue = newCacheValue
-			m.Lock()
-			m.Map[projectId] = newCacheValue
-			m.Unlock()
-		} else {
+func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, handle string, pv string) Metadata {
+	m.Lock()
+	cacheValue := m.Map[projectId]
+
+	// If the cache value exists but the IPFS URI has changed, invalidate the currently cached value.
+	if cacheValue != nil {
+		select {
+		case <-cacheValue.ready:
+			if cacheValue.MetadataIPFSUri != metadataUri {
+				cacheValue = nil
+			}
+		default:
+		}
+	}
+
+	// If there is no valid cache value, create a new one.
+	if cacheValue == nil {
+		// Create placeholder metadata (and new ready chan).
+		cacheValue = createPlaceholderCacheValue(projectId, handle, pv)
+		m.Map[projectId] = cacheValue
+		m.Unlock()
+
+		if metadataUri != "" {
 			// If there is a metadata URI, get the metadata from IPFS.
 			newMetadata, err := getMetadataForUri(metadataUri)
 			if err != nil {
-				log.Printf("Failed to get metadata for project %s: %v\n", projectId, err)
-				if exists {
-					log.Printf("Using cached metadata for project %s.\n", projectId)
-				} else {
-					log.Printf("No cached metadata. Creating placeholder metadata for project %s.\n", projectId)
-					newCacheValue := createPlaceholderCacheValue(projectId, handle, pv)
-					cacheValue = newCacheValue
-					m.Lock()
-					m.Map[projectId] = newCacheValue
-					m.Unlock()
-				}
+				log.Printf("Failed to fetch metadata for project %s (using placeholder): %v\n", projectId, err)
+				close(cacheValue.ready)
 			} else {
-				newCacheValue := MetadataCacheValue{
-					MetadataIPFSUri: metadataUri,
-					Metadata:        *newMetadata,
-				}
-				cacheValue = newCacheValue
-				m.Lock()
-				m.Map[projectId] = newCacheValue
-				m.Unlock()
+				cacheValue.Metadata = *newMetadata
+				close(cacheValue.ready)
 			}
 		}
+	} else {
+		m.Unlock()
+		<-cacheValue.ready
 	}
 
 	return cacheValue.Metadata
 }
 
-func createPlaceholderCacheValue(projectId string, handle string, pv string) MetadataCacheValue {
-	metadata := new(Metadata)
-	metadata.Name = fmt.Sprintf("Project %s", projectId)
-	projectLink := ""
+func createPlaceholderCacheValue(projectId string, handle string, pv string) *MetadataCacheValue {
+	metadata := &Metadata{Name: fmt.Sprintf("Project %s", projectId)}
 	if pv == "2" {
-		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
+		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
 	} else if pv == "1" {
 		metadata.Name += "(v1)"
-		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", handle)
+		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/p/%s", handle)
 	}
-	metadata.InfoUri = projectLink
 
-	return MetadataCacheValue{
+	return &MetadataCacheValue{
 		MetadataIPFSUri: "",
 		Metadata:        *metadata,
+		ready:           make(chan struct{}),
 	}
 }
