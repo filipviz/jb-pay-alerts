@@ -97,7 +97,7 @@ func main() {
 		}
 		projResp, err := v3NewProjects(previousTime, subgraphUrl)
 		if err != nil {
-			log.Printf("Failed to get v3 new projects: %v\n", err)
+			log.Printf("Failed to get new v3 projects: %v\n", err)
 		}
 		
 		// Fetch v4 events (bendystraw)
@@ -107,32 +107,32 @@ func main() {
 		}
 		projRespV4, err := v4NewProjects(previousTime, bendystrawUrl)
 		if err != nil {
-			log.Printf("Failed to get v4 new projects: %v\n", err)
+			log.Printf("Failed to get new v4 projects: %v\n", err)
 		}
 
 		// Process v3 events
-		if payResp != nil {
+		if payResp != nil && len(payResp.Data.PayEvents) > 0 {
 			log.Printf("Found %d v3 pay events", len(payResp.Data.PayEvents))
 			for _, payEvent := range payResp.Data.PayEvents {
 				processV3PayEvent(payEvent, config, &metadataCache, s)
 			}
 		}
-		if projResp != nil {
-			log.Printf("Found %d v3 new projects", len(projResp.Data.Projects))
+		if projResp != nil && len(projResp.Data.Projects) > 0 {
+			log.Printf("Found %d new v3 projects", len(projResp.Data.Projects))
 			for _, newProject := range projResp.Data.Projects {
 				processV3Project(newProject, config, &metadataCache, s)
 			}
 		}
 
 		// Process v4 events
-		if payRespV4 != nil {
+		if payRespV4 != nil && len(payRespV4.Data.PayEvents.Items) > 0 {
 			log.Printf("Found %d v4 pay events", len(payRespV4.Data.PayEvents.Items))
 			for _, payEvent := range payRespV4.Data.PayEvents.Items {
 				processV4PayEvent(payEvent, config, &metadataCache, s)
 			}
 		}
-		if projRespV4 != nil {
-			log.Printf("Found %d v4 new projects", len(projRespV4.Data.Projects.Items))
+		if projRespV4 != nil && len(projRespV4.Data.Projects.Items) > 0 {
+			log.Printf("Found %d new v4 projects", len(projRespV4.Data.Projects.Items))
 			groupedProjects := groupCrossChainV4Projects(projRespV4.Data.Projects.Items)
 			for _, projectGroup := range groupedProjects {
 				processV4ProjectGroup(projectGroup, config, &metadataCache, s)
@@ -155,7 +155,7 @@ func main() {
 	t := time.NewTicker(MINUTES_BETWEEN_CHECKS * time.Minute)
 	for {
 		currentTime := <-t.C
-		log.Printf("Checking for events since %v", previousTime)
+		log.Printf("Checking for events since %s\n", previousTime.Format(time.RFC3339))
 		processEvents()
 		previousTime = currentTime
 	}
@@ -292,14 +292,14 @@ func matchesPayEventConfig(configKey string, projectId int, chainId int, version
 		if len(parts) == 2 {
 			if configChainId, err := strconv.Atoi(parts[0]); err == nil {
 				if configProjectId, err := strconv.Atoi(parts[1]); err == nil {
-					return version == "v4" && chainId == configChainId && projectId == configProjectId
+					return version == "4" && chainId == configChainId && projectId == configProjectId
 				}
 			}
 		}
 	} else {
-		// Handle v3 format: just projectId
+		// Handle v2/v3 format: just projectId
 		if configProjectId, err := strconv.Atoi(configKey); err == nil {
-			return (version == "v3" || version == "v2") && chainId == 1 && projectId == configProjectId
+			return (version == "2" || version == "3") && chainId == 1 && projectId == configProjectId
 		}
 	}
 	
@@ -354,11 +354,11 @@ func processV4PayEvent(event PayEventV4, config map[string][]string, metadataCac
 		handle = event.Project.Handle
 	}
 	
-	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, "v4")
+	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, "4")
 
 	for channel, configKeys := range config {
 		for _, configKey := range configKeys {
-			if matchesPayEventConfig(configKey, event.ProjectId, event.ChainId, "v4") {
+			if matchesPayEventConfig(configKey, event.ProjectId, event.ChainId, "4") {
 				go func(channelID string) {
 					_, err := s.ChannelMessageSendEmbed(channelID, formatV4PayEvent(event, metadata))
 					if err != nil {
@@ -401,7 +401,7 @@ func processV4ProjectGroup(projectGroup []ProjectV4, config map[string][]string,
 	firstProject := projectGroup[0]
 	
 	cacheKey := fmt.Sprintf("v4:group:%s:%s", firstProject.MetadataUri, firstProject.Creator)
-	metadata := memoizedMetadata(metadataCache, cacheKey, firstProject.MetadataUri, firstProject.Handle, "v4")
+	metadata := memoizedMetadata(metadataCache, cacheKey, firstProject.MetadataUri, firstProject.Handle, "4")
 
 	for channel, configKeys := range config {
 		for _, configKey := range configKeys {
@@ -463,7 +463,7 @@ func formatV3PayEvent(event PayEvent, m Metadata) *discordgo.MessageEmbed {
 
 	// 2. Beneficiary
 	if event.Beneficiary != "" {
-		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, 1, event.Pv)
+		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, 1)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Beneficiary",
@@ -557,7 +557,7 @@ func formatV4PayEvent(event PayEventV4, m Metadata) *discordgo.MessageEmbed {
 
 	// 3. Beneficiary
 	if event.Beneficiary != "" {
-		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, event.ChainId, "v4")
+		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, event.ChainId)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Beneficiary",
@@ -581,7 +581,7 @@ func formatV4PayEvent(event PayEventV4, m Metadata) *discordgo.MessageEmbed {
 	if event.Project != nil {
 		handle = event.Project.Handle
 	}
-	projectLink := getProjectLink("v4", event.ChainId, event.ProjectId, handle)
+	projectLink := getProjectLink("4", event.ChainId, event.ProjectId, handle)
 	
 	title := fmt.Sprintf("Payment to %s", m.Name)
 
@@ -589,7 +589,7 @@ func formatV4PayEvent(event PayEventV4, m Metadata) *discordgo.MessageEmbed {
 		Title:     title,
 		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
 		URL:       projectLink,
-		Color:     getProjectColor("v4", event.ChainId, event.ProjectId),
+		Color:     getProjectColor("4", event.ChainId, event.ProjectId),
 		Fields:    fields,
 	}
 	
@@ -605,7 +605,7 @@ func formatV3Project(event Project, m Metadata) *discordgo.MessageEmbed {
 	fields := make([]*discordgo.MessageEmbedField, 0, 5)
 
 	if event.Creator != "" {
-		creator, creatorUrl := formatAddressLink(event.Creator, 1, event.Pv)
+		creator, creatorUrl := formatAddressLink(event.Creator, 1)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Creator",
@@ -615,7 +615,7 @@ func formatV3Project(event Project, m Metadata) *discordgo.MessageEmbed {
 	}
 
 	if event.Creator != event.Owner && event.Owner != "" {
-		owner, ownerUrl := formatAddressLink(event.Owner, 1, event.Pv)
+		owner, ownerUrl := formatAddressLink(event.Owner, 1)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Owner",
@@ -671,7 +671,7 @@ func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.Messa
 		networks = append(networks, chainName)
 		
 		// Add project links for each network
-		link := getProjectLink("v4", project.ChainId, project.ProjectId, project.Handle)
+		link := getProjectLink("4", project.ChainId, project.ProjectId, project.Handle)
 		projectLinks = append(projectLinks, fmt.Sprintf("[%s](%s)", chainName, link))
 	}
 	
@@ -685,7 +685,7 @@ func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.Messa
 	}
 
 	if firstProject.Creator != "" {
-		creator, creatorUrl := formatAddressLink(firstProject.Creator, firstProject.ChainId, "v4")
+		creator, creatorUrl := formatAddressLink(firstProject.Creator, firstProject.ChainId)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Creator",
@@ -695,7 +695,7 @@ func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.Messa
 	}
 
 	if firstProject.Creator != firstProject.Owner && firstProject.Owner != "" {
-		owner, ownerUrl := formatAddressLink(firstProject.Owner, firstProject.ChainId, "v4")
+		owner, ownerUrl := formatAddressLink(firstProject.Owner, firstProject.ChainId)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Owner",
@@ -722,31 +722,31 @@ func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.Messa
 	}
 
 	// Use the first project's link as the main URL
-	mainProjectLink := getProjectLink("v4", firstProject.ChainId, firstProject.ProjectId, firstProject.Handle)
+	mainProjectLink := getProjectLink("4", firstProject.ChainId, firstProject.ProjectId, firstProject.Handle)
 
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
 		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
 		URL:         mainProjectLink,
-		Color:       getProjectColor("v4", firstProject.ChainId, firstProject.ProjectId),
+		Color:       getProjectColor("4", firstProject.ChainId, firstProject.ProjectId),
 		Fields:      fields,
 	}
 }
 
 func getProjectLink(version string, chainId int, projectId int, handle string) string {
 	// v1 projects use handle
-	if version == "v1" {
+	if version == "1" {
 		return fmt.Sprintf("https://juicebox.money/p/%s", handle)
 	}
 	
 	// v2 and v3 projects use v2/p/ format
-	if version == "v2" || version == "v3" {
+	if version == "2" || version == "3" {
 		return fmt.Sprintf("https://juicebox.money/v2/p/%d", projectId)
 	}
 	
 	// v4 projects use v4/{network}:{projectId} format
-	if version == "v4" {
+	if version == "4" {
 		return fmt.Sprintf("https://juicebox.money/v4/%s:%d", getChainShortName(chainId), projectId)
 	}
 	
@@ -791,7 +791,7 @@ func getExplorerUrl(chainId int, path string) string {
 }
 
 // Format address as a link with ENS resolution
-func formatAddressLink(address string, chainId int, version string) (string, string) {
+func formatAddressLink(address string, chainId int) (string, string) {
 	// Get display name with combined ENS/truncation logic
 	var displayName string
 	
@@ -822,15 +822,7 @@ func formatAddressLink(address string, chainId int, version string) (string, str
 		}
 	}
 	
-	// Get URL based on version
-	var url string
-	if version == "v4" {
-		url = getExplorerUrl(chainId, fmt.Sprintf("address/%s", address))
-	} else {
-		url = fmt.Sprintf("https://juicebox.money/account/%s", address)
-	}
-	
-	return displayName, url
+	return displayName, getExplorerUrl(chainId, fmt.Sprintf("address/%s", address))
 }
 
 // IPFS URL patterns used by both extract and remove functions
@@ -1015,11 +1007,11 @@ func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, ha
 
 func createPlaceholderCacheValue(projectId string, handle string, pv string) *MetadataCacheValue {
 	metadata := &Metadata{Name: fmt.Sprintf("Project %s", projectId)}
-	if pv == "v4" {
+	if pv == "4" {
 		metadata.Name = fmt.Sprintf("Project %s (v4)", projectId)
-	} else if pv == "v3" || pv == "2" {
+	} else if pv == "3" || pv == "2" {
 		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
-	} else if pv == "v1" || pv == "1" {
+	} else if pv == "1" {
 		metadata.Name += " (v1)"
 		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/p/%s", handle)
 	}
