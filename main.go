@@ -3,17 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"math/big"
-	"math/rand"
 	"net/http"
 	"os"
-	"os/signal"
-	"sync"
-	"syscall"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -25,68 +25,6 @@ const (
 	IPFS_ENDPOINT          = "https://jbm.infura-ipfs.io/ipfs/"
 )
 
-type GraphQLRequest struct {
-	Query string `json:"query"`
-}
-
-type PayEvent struct {
-	Pv          string `json:"pv"`
-	ProjectId   int    `json:"projectId"`
-	Amount      string `json:"amount"`
-	AmountUSD   string `json:"amountUSD"`
-	Timestamp   int    `json:"timestamp"`
-	Beneficiary string `json:"beneficiary"`
-	Note        string `json:"note"`
-	TxHash      string `json:"txHash"`
-	Project     struct {
-		MetadataUri string `json:"metadataUri"`
-		Handle      string `json:"handle"`
-	} `json:"project"`
-}
-
-type PayEventsResponse struct {
-	Data struct {
-		PayEvents []PayEvent `json:"payEvents"`
-	} `json:"data"`
-}
-
-type Project struct {
-	Pv          string `json:"pv"`
-	Handle      string `json:"handle"`
-	ProjectId   int    `json:"projectId"`
-	MetadataUri string `json:"metadataUri"`
-	Creator     string `json:"creator"`
-	Owner       string `json:"owner"`
-	InitEvents  []struct {
-		TxHash string `json:"txHash"`
-	} `json:"initEvents"`
-}
-
-type ProjectsResponse struct {
-	Data struct {
-		Projects []Project `json:"projects"`
-	}
-}
-
-type Metadata struct {
-	Name           string `json:"name"`
-	InfoUri        string `json:"infoUri"`
-	LogoUri        string `json:"logoUri"`
-	Description    string `json:"description"`
-	ProjectTagline string `json:"projectTagline"`
-}
-
-type MetadataCacheValue struct {
-	MetadataIPFSUri string
-	Metadata        Metadata
-	ready           chan struct{} // Closed when metadata is ready.
-}
-
-type MetadataCache struct {
-	sync.Mutex // Protects the map.
-	Map        map[string]*MetadataCacheValue
-}
-
 func main() {
 	// Read and check environment variables.
 	if err := godotenv.Load(".env"); err != nil {
@@ -96,28 +34,29 @@ func main() {
 	if discordToken == "" {
 		log.Fatalln("Could not find DISCORD_TOKEN in .env file")
 	}
+	// The subgraph provides events for Juicebox v1, v2, and v3.
 	subgraphUrl := os.Getenv("SUBGRAPH_URL")
 	if subgraphUrl == "" {
-		log.Fatalln("SUBGRAPH_URL must be set")
+		log.Fatalln("Could not find SUBGRAPH_URL in .env file")
 	}
+	// Bendystraw provides events for Juicebox v4.
+	bendystrawUrl := os.Getenv("BENDYSTRAW_URL")
+	if bendystrawUrl == "" {
+		log.Fatalln("Could not find BENDYSTRAW_URL in .env file")
+	}
+	// When testing, we log events from the past 14 days then exit
+	testing := os.Getenv("TESTING") == "1"
 
 	// Read the config file.
 	configBytes, err := os.ReadFile("config.json")
 	if err != nil {
 		log.Fatalf("Failed to read config file: %v\n", err)
 	}
+	// config is a map of channel IDs to notification types - see README.md
 	var config map[string][]string
 	err = json.Unmarshal(configBytes, &config)
 	if err != nil {
 		log.Fatalf("Failed to parse config file: %v\n", err)
-	}
-
-	// Invert the config map
-	projectsToChannels := make(map[string][]string)
-	for channel, projects := range config {
-		for _, project := range projects {
-			projectsToChannels[project] = append(projectsToChannels[project], channel)
-		}
 	}
 
 	// Initialize the metadata cache (map of project IDs to `MetadataCacheValue`s)
@@ -125,327 +64,829 @@ func main() {
 		Map: make(map[string]*MetadataCacheValue),
 	}
 
-	log.Println("Started.")
+	// Initialize, configure, and open our discord session.
+	s, err := discordgo.New("Bot " + discordToken)
+	if err != nil {
+		log.Fatalf("Failed to create discord session: %v\n", err)
+	}
+	s.ShouldRetryOnRateLimit = true
+	s.ShouldReconnectOnError = true
+	s.AddHandler(func(s *discordgo.Session, d *discordgo.Disconnect) {
+		log.Println("Discord disconnected, reconnecting...")
+	})
+	if err = s.Open(); err != nil {
+		log.Fatalf("Failed to open discord session: %v\n", err)
+	}
+	defer s.Close()
+	log.Println("Discord session opened")
 
-	// Start a 5 minute ticker.
-	// Run loop off of the main thread.
-	go func() {
-		previousTime := time.Now()
-		t := time.NewTicker(MINUTES_BETWEEN_CHECKS * time.Minute)
-		for {
-			currentTime := <-t.C
-			// Every 5 minutes, check the subgraph for new pay events.
-			// If there are new pay events, send them to the appropriate places.
-			payResp, err := getPayEvents(previousTime, subgraphUrl)
-			if err != nil {
-				log.Printf("Failed to get pay events: %v\n", err)
-				continue
-			}
-
-			projResp, err := getNewProjects(previousTime, subgraphUrl)
-			if err != nil {
-				log.Printf("Failed to get new projects: %v\n", err)
-				continue
-			}
-
-			if len(payResp.Data.PayEvents) > 0 || len(projResp.Data.Projects) > 0 {
-				// If there are pay events, initialize a new discord session.
-				s, err := discordgo.New("Bot " + discordToken)
-				if err != nil {
-					log.Printf("Failed to create discord session: %v\n", err)
-					continue
-				}
-
-				// s.LogLevel = discordgo.LogWarning
-				s.ShouldRetryOnRateLimit = true
-				if err = s.Open(); err != nil {
-					log.Printf("Failed to open discord session: %v\n", err)
-					continue
-				} else {
-					log.Println("Discord session opened")
-				}
-
-				for _, payEvent := range payResp.Data.PayEvents {
-					go func(p PayEvent) {
-						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
-						metadata := memoizedMetadata(&metadataCache, projectIdStr, p.Project.MetadataUri, p.Project.Handle, p.Pv)
-
-						// Check for wildcard channels, and notify them if they exist.
-						wChannels, wExists := projectsToChannels["*"]
-						if wExists {
-							go sendPayEventToDiscord(p, wChannels, metadata, s)
-						}
-
-						// Check for channels for this project, and notify them if they exist.
-						pChannels, pExists := projectsToChannels[projectIdStr]
-						if pExists {
-							go sendPayEventToDiscord(p, pChannels, metadata, s)
-						}
-					}(payEvent)
-				}
-
-				for _, newProject := range projResp.Data.Projects {
-					go func(p Project) {
-						projectIdStr := fmt.Sprintf("%d", p.ProjectId)
-						metadata := memoizedMetadata(&metadataCache, projectIdStr, p.MetadataUri, p.Handle, p.Pv)
-
-						channels, exists := projectsToChannels["new"]
-						if exists {
-							go sendNewProjectToDiscord(p, channels, metadata, s)
-						}
-					}(newProject)
-				}
-			}
-
-			previousTime = currentTime
+	// We log events which occurred since previousTime, then update previousTime to now.
+	previousTime := time.Now()
+	if testing {
+		// When testing, we send events from the past 14 days then exit
+		previousTime = time.Now().AddDate(0, 0, -14)
+		log.Printf("Testing mode: checking events from the past 14 days (since %v)\n", previousTime)
+	}
+	
+	// processEvents fetches, processes, and sends new events.
+	processEvents := func() {
+		// Fetch v3 events (subgraph)
+		payResp, err := v3PayEvents(previousTime, subgraphUrl)
+		if err != nil {
+			log.Printf("Failed to get v3 pay events: %v\n", err)
 		}
-	}()
+		projResp, err := v3NewProjects(previousTime, subgraphUrl)
+		if err != nil {
+			log.Printf("Failed to get v3 new projects: %v\n", err)
+		}
+		
+		// Fetch v4 events (bendystraw)
+		payRespV4, err := v4PayEvents(previousTime, bendystrawUrl)
+		if err != nil {
+			log.Printf("Failed to get v4 pay events: %v\n", err)
+		}
+		projRespV4, err := v4NewProjects(previousTime, bendystrawUrl)
+		if err != nil {
+			log.Printf("Failed to get v4 new projects: %v\n", err)
+		}
 
-	// Wait for signal to stop.
-	sc := make(chan os.Signal, 1)
-	signal.Notify(sc, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGSEGV, syscall.SIGHUP)
-	<-sc
+		// Process v3 events
+		if payResp != nil {
+			log.Printf("Found %d v3 pay events", len(payResp.Data.PayEvents))
+			for _, payEvent := range payResp.Data.PayEvents {
+				processV3PayEvent(payEvent, config, &metadataCache, s)
+			}
+		}
+		if projResp != nil {
+			log.Printf("Found %d v3 new projects", len(projResp.Data.Projects))
+			for _, newProject := range projResp.Data.Projects {
+				processV3Project(newProject, config, &metadataCache, s)
+			}
+		}
+
+		// Process v4 events
+		if payRespV4 != nil {
+			log.Printf("Found %d v4 pay events", len(payRespV4.Data.PayEvents.Items))
+			for _, payEvent := range payRespV4.Data.PayEvents.Items {
+				processV4PayEvent(payEvent, config, &metadataCache, s)
+			}
+		}
+		if projRespV4 != nil {
+			log.Printf("Found %d v4 new projects", len(projRespV4.Data.Projects.Items))
+			groupedProjects := groupCrossChainV4Projects(projRespV4.Data.Projects.Items)
+			for _, projectGroup := range groupedProjects {
+				processV4ProjectGroup(projectGroup, config, &metadataCache, s)
+			}
+		}
+	}
+	
+	if testing {
+		// In testing mode, run once immediately and exit
+		log.Println("Running event processing once in testing mode...")
+		processEvents()
+		log.Println("Waiting for Discord messages to send...")
+		time.Sleep(60 * time.Second)
+		log.Println("Testing complete, exiting...")
+		return
+	}
+	
+	// Blocking loop to check for events every MINUTES_BETWEEN_CHECKS minutes
+	log.Printf("Starting ticker with %d minute intervals", MINUTES_BETWEEN_CHECKS)
+	t := time.NewTicker(MINUTES_BETWEEN_CHECKS * time.Minute)
+	for {
+		currentTime := <-t.C
+		log.Printf("Checking for events since %v", previousTime)
+		processEvents()
+		previousTime = currentTime
+	}
 }
 
-// Get the pay events from the Subgraph URL since the given time.
-func getPayEvents(since time.Time, subgraphUrl string) (*PayEventsResponse, error) {
-	reqBody := GraphQLRequest{
-		Query: `{
-			payEvents(
-			  first: 1000
-			  orderBy: timestamp
-			  orderDirection: asc
-			  where: {timestamp_gt:` +
-			fmt.Sprintf("%d", since.Unix()) +
-			`}) {
-				pv
+// Generic GraphQL request function
+func makeGraphQLRequest[T any](url, query string) (*T, error) {
+	reqBodyBytes, err := json.Marshal(GraphQLRequest{Query: query})
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling request: %w", err)
+	}
+	
+	resp, err := http.Post(url, "application/json", bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("error posting request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %w", err)
+	}
+
+	var result T
+	if err = json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("error unmarshalling response: %w", err)
+	}
+	return &result, nil
+}
+
+func v3PayEvents(since time.Time, subgraphUrl string) (*V3PayEventsResponse, error) {
+	query := fmt.Sprintf(`{
+		payEvents(
+		  first: 1000
+		  orderBy: timestamp
+		  orderDirection: asc
+		  where: {timestamp_gt:%d}) {
+			pv
+			projectId
+			amount
+			amountUSD
+			timestamp
+			beneficiary
+			note
+			txHash
+			project {
+				metadataUri
+				handle
+			}
+		}
+	}`, since.Unix())
+	return makeGraphQLRequest[V3PayEventsResponse](subgraphUrl, query)
+}
+
+func v3NewProjects(since time.Time, subgraphUrl string) (*V3ProjectsResponse, error) {
+	query := fmt.Sprintf(`{
+		projects(
+		  first: 1000
+		  orderBy: createdAt
+		  orderDirection: desc
+		  where: {createdAt_gt:%d}) {
+		  pv
+		  handle
+		  projectId
+		  metadataUri
+		  creator
+		  owner    
+		  initEvents(first: 1, orderBy: timestamp, orderDirection: asc) {
+			txHash
+		  }
+		}
+	}`, since.Unix())
+	return makeGraphQLRequest[V3ProjectsResponse](subgraphUrl, query)
+}
+
+func v4PayEvents(since time.Time, bendystrawUrl string) (*V4PayEventsResponse, error) {
+	query := fmt.Sprintf(`{
+		payEvents(
+		  orderBy: "timestamp"
+		  orderDirection: "asc"
+		  where: {timestamp_gt:%d}
+		  limit: 1000) {
+			items {
+				chainId
 				projectId
 				amount
-				amountUSD
+				amountUsd
 				timestamp
 				beneficiary
-				note
 				txHash
+				memo
 				project {
-					metadataUri
 					handle
+					metadataUri
+					creator
+					owner
 				}
 			}
-		}`,
-	}
-	reqBodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("error marshalling request body: %w", err)
-	}
-	resp, err := http.Post(subgraphUrl, "application/json", bytes.NewBuffer(reqBodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("error posting request to subgraph: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading subgraph response body: %w", err)
-	}
-
-	var p PayEventsResponse
-	if err = json.Unmarshal(respBody, &p); err != nil {
-		return nil, fmt.Errorf("error unmarshalling response body: %w", err)
-	}
-
-	return &p, nil
+		}
+	}`, since.Unix())
+	return makeGraphQLRequest[V4PayEventsResponse](bendystrawUrl, query)
 }
 
-func getNewProjects(since time.Time, subgraphUrl string) (*ProjectsResponse, error) {
-	reqBody := GraphQLRequest{
-		Query: `{
-			projects(
-			  first: 1000
-			  orderBy: createdAt
-			  orderDirection: desc
-			  where: {createdAt_gt:` +
-			fmt.Sprintf("%d", since.Unix()) +
-			`}
-			) {
-			  pv
-			  handle
-			  projectId
-			  metadataUri
-			  creator
-			  owner    
-			  initEvents(first: 1, orderBy: timestamp, orderDirection: asc) {
-				txHash
-			  }
+func v4NewProjects(since time.Time, bendystrawUrl string) (*V4ProjectsResponse, error) {
+	query := fmt.Sprintf(`{
+		projects(
+		  orderBy: "createdAt"
+		  orderDirection: "desc"
+		  where: {createdAt_gt:%d}
+		  limit: 1000) {
+			items {
+				chainId
+				projectId
+				handle
+				metadataUri
+				creator
+				owner
 			}
-		  }`,
-	}
-	reqBodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("error marshalling request body: %w", err)
-	}
-	resp, err := http.Post(subgraphUrl, "application/json", bytes.NewBuffer(reqBodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("error posting request to subgraph: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading subgraph response body: %w", err)
-	}
-
-	var p ProjectsResponse
-	if err = json.Unmarshal(respBody, &p); err != nil {
-		return nil, fmt.Errorf("error unmarshalling response body: %w", err)
-	}
-
-	return &p, nil
+		}
+	}`, since.Unix())
+	return makeGraphQLRequest[V4ProjectsResponse](bendystrawUrl, query)
 }
 
-func sendPayEventToDiscord(p PayEvent, channels []string, m Metadata, s *discordgo.Session) {
-	for _, channel := range channels {
-		_, err := s.ChannelMessageSendEmbed(channel, formatPayEvent(p, m))
-		if err != nil {
-			log.Printf("Failed to send message to channel %s: %v\n", channel, err)
+// Check if a pay event matches a config string
+func matchesPayEventConfig(configKey string, projectId int, chainId int, version string) bool {
+	// Handle global wildcard - all payments across all versions
+	if configKey == "pay" {
+		return true
+	}
+	
+	// Handle v4 format: chainId:projectId
+	if strings.Contains(configKey, ":") {
+		parts := strings.Split(configKey, ":")
+		if len(parts) == 2 {
+			if configChainId, err := strconv.Atoi(parts[0]); err == nil {
+				if configProjectId, err := strconv.Atoi(parts[1]); err == nil {
+					return version == "v4" && chainId == configChainId && projectId == configProjectId
+				}
+			}
+		}
+	} else {
+		// Handle v3 format: just projectId
+		if configProjectId, err := strconv.Atoi(configKey); err == nil {
+			return (version == "v3" || version == "v2") && chainId == 1 && projectId == configProjectId
+		}
+	}
+	
+	return false
+}
+
+// Group projects by metadata URI and creator (cross-chain deployments)
+func groupCrossChainV4Projects(projects []ProjectV4) [][]ProjectV4 {
+	groups := make(map[string][]ProjectV4)
+	
+	for _, project := range projects {
+		// Use metadataUri + creator as the key to group cross-chain projects
+		key := project.MetadataUri + "|" + project.Creator
+		groups[key] = append(groups[key], project)
+	}
+	
+	var result [][]ProjectV4
+	for _, group := range groups {
+		result = append(result, group)
+	}
+	
+	return result
+}
+
+// Process v3 pay event and send alerts to any matching channels
+func processV3PayEvent(event PayEvent, config map[string][]string, metadataCache *MetadataCache, s *discordgo.Session) {
+	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectId)
+	metadata := memoizedMetadata(metadataCache, cacheKey, event.Project.MetadataUri, event.Project.Handle, event.Pv)
+
+	for channel, configKeys := range config {
+		for _, configKey := range configKeys {
+			if matchesPayEventConfig(configKey, event.ProjectId, 1, event.Pv) {
+				go func(channelID string) {
+					_, err := s.ChannelMessageSendEmbed(channelID, formatV3PayEvent(event, metadata))
+					if err != nil {
+						log.Printf("Failed to send message to channel %s: %v\n", channelID, err)
+					}
+				}(channel)
+				break // Only send once per channel
+			}
 		}
 	}
 }
 
-func sendNewProjectToDiscord(p Project, channels []string, m Metadata, s *discordgo.Session) {
-	for _, channel := range channels {
-		_, err := s.ChannelMessageSendEmbed(channel, formatProjectMessage(p, m))
-		if err != nil {
-			log.Printf("Failed to send message to channel %s: %v\n", channel, err)
+// Process v4 pay event and send alerts to any matching channels
+func processV4PayEvent(event PayEventV4, config map[string][]string, metadataCache *MetadataCache, s *discordgo.Session) {
+	cacheKey := fmt.Sprintf("v4:%d:%d", event.ChainId, event.ProjectId)
+	
+	var metadataUri, handle string
+	if event.Project != nil {
+		metadataUri = event.Project.MetadataUri
+		handle = event.Project.Handle
+	}
+	
+	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, "v4")
+
+	for channel, configKeys := range config {
+		for _, configKey := range configKeys {
+			if matchesPayEventConfig(configKey, event.ProjectId, event.ChainId, "v4") {
+				go func(channelID string) {
+					_, err := s.ChannelMessageSendEmbed(channelID, formatV4PayEvent(event, metadata))
+					if err != nil {
+						log.Printf("Failed to send message to channel %s: %v\n", channelID, err)
+					}
+				}(channel)
+				break // Only send once per channel
+			}
 		}
 	}
 }
 
-func formatProjectMessage(p Project, m Metadata) *discordgo.MessageEmbed {
-	fields := make([]*discordgo.MessageEmbedField, 0, 4)
+// Process a new v3 project event and send alerts to any matching channels
+func processV3Project(event Project, config map[string][]string, metadataCache *MetadataCache, s *discordgo.Session) {
+	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectId)
+	metadata := memoizedMetadata(metadataCache, cacheKey, event.MetadataUri, event.Handle, event.Pv)
 
-	if m.ProjectTagline != "" {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Tagline",
-			Value:  m.ProjectTagline,
-			Inline: false,
-		})
-	}
-
-	if p.Creator != "" {
-		var creator string
-		if ensName, err := getEnsForAddress(p.Creator); err == nil {
-			creator = ensName
-		} else {
-			creator = p.Creator
+	for channel, configKeys := range config {
+		for _, configKey := range configKeys {
+			if configKey == "new" {
+				go func(channelID string) {
+					_, err := s.ChannelMessageSendEmbed(channelID, formatV3Project(event, metadata))
+					if err != nil {
+						log.Printf("Failed to send message to channel %s: %v\n", channelID, err)
+					}
+				}(channel)
+				break // Only send once per channel
+			}
 		}
-
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Creator",
-			Value:  fmt.Sprintf("[%s](https://juicebox.money/account/%s)", creator, p.Creator),
-			Inline: true,
-		})
-	}
-
-	if p.Creator != p.Owner {
-		var owner string
-		if ensName, err := getEnsForAddress(p.Owner); err == nil {
-			owner = ensName
-		} else {
-			owner = p.Owner
-		}
-
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Owner",
-			Value:  fmt.Sprintf("[%s](https://juicebox.money/account/%s)", owner, p.Owner),
-			Inline: true,
-		})
-	}
-
-	if len(p.InitEvents) != 0 && p.InitEvents[0].TxHash != "" {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Transaction",
-			Value:  fmt.Sprintf("[Etherscan](https://etherscan.io/tx/%s)", p.InitEvents[0].TxHash),
-			Inline: true,
-		})
-	}
-
-	projectLink := ""
-	if p.Pv == "2" {
-		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
-	} else if p.Pv == "1" {
-		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Handle)
-	}
-
-	return &discordgo.MessageEmbed{
-		Title:     fmt.Sprintf("New project: %s", m.Name),
-		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
-		URL:       projectLink,
-		Color:     rand.Intn(0xffffff + 1),
-		Fields:    fields,
 	}
 }
 
-func formatPayEvent(p PayEvent, m Metadata) *discordgo.MessageEmbed {
-	fields := make([]*discordgo.MessageEmbedField, 0, 4)
-	if p.Note != "" {
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   "Note",
-			Value:  p.Note,
-			Inline: false,
-		})
+// Process a group of v4 projects (potentially cross-chain) and send alerts to any matching channels
+func processV4ProjectGroup(projectGroup []ProjectV4, config map[string][]string, metadataCache *MetadataCache, s *discordgo.Session) {
+	if len(projectGroup) == 0 {
+		return
+	}
+	
+	// Use the first project for basic info
+	firstProject := projectGroup[0]
+	
+	cacheKey := fmt.Sprintf("v4:group:%s:%s", firstProject.MetadataUri, firstProject.Creator)
+	metadata := memoizedMetadata(metadataCache, cacheKey, firstProject.MetadataUri, firstProject.Handle, "v4")
+
+	for channel, configKeys := range config {
+		for _, configKey := range configKeys {
+			if configKey == "new" {
+				go func(channelID string) {
+					_, err := s.ChannelMessageSendEmbed(channelID, formatV4ProjectGroup(projectGroup, metadata))
+					if err != nil {
+						log.Printf("Failed to send message to channel %s: %v\n", channelID, err)
+					}
+				}(channel)
+				break // Only send once per channel
+			}
+		}
+	}
+}
+
+func formatV3PayEvent(event PayEvent, m Metadata) *discordgo.MessageEmbed {
+	fields := make([]*discordgo.MessageEmbedField, 0, 6)
+	
+	// Check for IPFS image in note/memo first
+	var noteImage string
+	noteText := event.Note
+	if event.Note != "" {
+		if imageUrl := extractIPFSImage(event.Note); imageUrl != "" {
+			noteImage = imageUrl
+		}
+		// Remove IPFS URLs from the note text
+		noteText = removeIPFSUrls(noteText)
+		
+		if noteText != "" {
+			fields = append(fields, &discordgo.MessageEmbedField{
+				Name:   "Note",
+				Value:  noteText,
+				Inline: false,
+			})
+		}
 	}
 
-	if p.Amount != "" && p.AmountUSD != "" {
-		amountStr, err := parseFixedPointString(p.Amount, 18, -1)
-		amountUsdStr, usdErr := parseFixedPointString(p.AmountUSD, 18, 2)
-		if err == nil && usdErr == nil {
+	// Field order: Amount, Beneficiary, Transaction
+	
+	// 1. Amount
+	if event.Amount != "" {
+		amountStr, err := parseFixedPointString(event.Amount, 18, -1)
+		if err == nil {
+			value := fmt.Sprintf("%s ETH", amountStr)
+			if event.AmountUSD != "" {
+				amountUsdStr, usdErr := parseFixedPointString(event.AmountUSD, 18, 2)
+				if usdErr == nil {
+					value = fmt.Sprintf("%s ETH ($%s USD)", amountStr, amountUsdStr)
+				}
+			}
 			fields = append(fields, &discordgo.MessageEmbedField{
 				Name:   "Amount",
-				Value:  fmt.Sprintf("%s ETH ($%s USD)", amountStr, amountUsdStr),
+				Value:  value,
 				Inline: true,
 			})
-		} else {
-			log.Printf("Failed to parse amount string: %v\n", err)
 		}
 	}
 
-	if p.Beneficiary != "" {
-		var beneficiary string
-		if ensName, err := getEnsForAddress(p.Beneficiary); err == nil {
-			beneficiary = ensName
-		} else {
-			beneficiary = p.Beneficiary
-		}
+	// 2. Beneficiary
+	if event.Beneficiary != "" {
+		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, 1, event.Pv)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Beneficiary",
-			Value:  fmt.Sprintf("[%s](https://juicebox.money/account/%s)", beneficiary, p.Beneficiary),
+			Value:  fmt.Sprintf("[%s](%s)", beneficiary, beneficiaryUrl),
 			Inline: true,
 		})
 	}
 
-	if p.TxHash != "" {
+	// 3. Transaction
+	if event.TxHash != "" {
+		explorerUrl := getExplorerUrl(1, fmt.Sprintf("tx/%s", event.TxHash))
+		
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Transaction",
-			Value:  fmt.Sprintf("[Etherscan](https://etherscan.io/tx/%s)", p.TxHash),
+			Value:  fmt.Sprintf("[Explorer](%s)", explorerUrl),
 			Inline: true,
 		})
 	}
 
-	projectLink := ""
-	if p.Pv == "2" {
-		projectLink = fmt.Sprintf("https://juicebox.money/v2/p/%d", p.ProjectId)
-	} else if p.Pv == "1" {
-		projectLink = fmt.Sprintf("https://juicebox.money/p/%s", p.Project.Handle)
+	projectLink := getProjectLink(event.Pv, 1, event.ProjectId, event.Project.Handle)
+	
+	title := fmt.Sprintf("Payment to %s", m.Name)
+
+	embed := &discordgo.MessageEmbed{
+		Title:     title,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		URL:       projectLink,
+		Color:     getProjectColor(event.Pv, 1, event.ProjectId),
+		Fields:    fields,
+	}
+	
+	// Add image if found in note
+	if noteImage != "" {
+		// Put note image in main image field (thumbnail is used for project logo)
+		embed.Image = &discordgo.MessageEmbedImage{URL: noteImage}
+	}
+	
+	return embed
+}
+
+func formatV4PayEvent(event PayEventV4, m Metadata) *discordgo.MessageEmbed {
+	fields := make([]*discordgo.MessageEmbedField, 0, 6)
+	
+	// Check for IPFS image in memo first
+	var noteImage string
+	noteText := event.Memo
+	if event.Memo != "" {
+		if imageUrl := extractIPFSImage(event.Memo); imageUrl != "" {
+			noteImage = imageUrl
+		}
+		// Remove ALL IPFS URLs from the note text
+		noteText = removeIPFSUrls(noteText)
+		
+		if noteText != "" {
+			fields = append(fields, &discordgo.MessageEmbedField{
+				Name:   "Note",
+				Value:  noteText,
+				Inline: false,
+			})
+		}
+	}
+
+	// Field order: Amount, Network, Beneficiary, Transaction
+	
+	// 1. Amount
+	if event.Amount != "" {
+		amountStr, err := parseFixedPointString(event.Amount, 18, -1)
+		if err == nil {
+			value := fmt.Sprintf("%s ETH", amountStr)
+			if event.AmountUsd != "" {
+				amountUsdStr, usdErr := parseFixedPointString(event.AmountUsd, 18, 2)
+				if usdErr == nil {
+					value = fmt.Sprintf("%s ETH ($%s USD)", amountStr, amountUsdStr)
+				}
+			}
+			fields = append(fields, &discordgo.MessageEmbedField{
+				Name:   "Amount",
+				Value:  value,
+				Inline: true,
+			})
+		}
+	}
+
+	// 2. Network
+	chainName := getChainName(event.ChainId)
+	fields = append(fields, &discordgo.MessageEmbedField{
+		Name:   "Network",
+		Value:  chainName,
+		Inline: true,
+	})
+
+	// 3. Beneficiary
+	if event.Beneficiary != "" {
+		beneficiary, beneficiaryUrl := formatAddressLink(event.Beneficiary, event.ChainId, "v4")
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Beneficiary",
+			Value:  fmt.Sprintf("[%s](%s)", beneficiary, beneficiaryUrl),
+			Inline: true,
+		})
+	}
+
+	// 4. Transaction
+	if event.TxHash != "" {
+		explorerUrl := getExplorerUrl(event.ChainId, fmt.Sprintf("tx/%s", event.TxHash))
+		
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Transaction",
+			Value:  fmt.Sprintf("[Explorer](%s)", explorerUrl),
+			Inline: true,
+		})
+	}
+
+	handle := ""
+	if event.Project != nil {
+		handle = event.Project.Handle
+	}
+	projectLink := getProjectLink("v4", event.ChainId, event.ProjectId, handle)
+	
+	title := fmt.Sprintf("Payment to %s", m.Name)
+
+	embed := &discordgo.MessageEmbed{
+		Title:     title,
+		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		URL:       projectLink,
+		Color:     getProjectColor("v4", event.ChainId, event.ProjectId),
+		Fields:    fields,
+	}
+	
+	// Add image if found in note
+	if noteImage != "" {
+		embed.Image = &discordgo.MessageEmbedImage{URL: noteImage}
+	}
+	
+	return embed
+}
+
+func formatV3Project(event Project, m Metadata) *discordgo.MessageEmbed {
+	fields := make([]*discordgo.MessageEmbedField, 0, 5)
+
+	if event.Creator != "" {
+		creator, creatorUrl := formatAddressLink(event.Creator, 1, event.Pv)
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Creator",
+			Value:  fmt.Sprintf("[%s](%s)", creator, creatorUrl),
+			Inline: true,
+		})
+	}
+
+	if event.Creator != event.Owner && event.Owner != "" {
+		owner, ownerUrl := formatAddressLink(event.Owner, 1, event.Pv)
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Owner",
+			Value:  fmt.Sprintf("[%s](%s)", owner, ownerUrl),
+			Inline: true,
+		})
+	}
+
+	if len(event.InitEvents) > 0 && event.InitEvents[0].TxHash != "" {
+		explorerUrl := getExplorerUrl(1, fmt.Sprintf("tx/%s", event.InitEvents[0].TxHash))
+		
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Transaction",
+			Value:  fmt.Sprintf("[Explorer](%s)", explorerUrl),
+			Inline: true,
+		})
+	}
+
+	projectLink := getProjectLink(event.Pv, 1, event.ProjectId, event.Handle)
+	title := fmt.Sprintf("New project: %s", m.Name)
+	
+	// Put tagline directly as description (no label)
+	var description string
+	if m.ProjectTagline != "" {
+		description = m.ProjectTagline
 	}
 
 	return &discordgo.MessageEmbed{
-		Title:     fmt.Sprintf("Payment to %s", m.Name),
-		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
-		URL:       projectLink,
-		Color:     rand.Intn(0xffffff + 1),
-		Fields:    fields,
+		Title:       title,
+		Description: description,
+		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		URL:         projectLink,
+		Color:       getProjectColor(event.Pv, 1, event.ProjectId),
+		Fields:      fields,
 	}
 }
 
+func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.MessageEmbed {
+	if len(projectGroup) == 0 {
+		return nil
+	}
+	
+	// Use first project for basic info
+	firstProject := projectGroup[0]
+	
+	fields := make([]*discordgo.MessageEmbedField, 0, 5)
+
+	// Build networks list
+	var networks []string
+	var projectLinks []string
+	for _, project := range projectGroup {
+		chainName := getChainName(project.ChainId)
+		networks = append(networks, chainName)
+		
+		// Add project links for each network
+		link := getProjectLink("v4", project.ChainId, project.ProjectId, project.Handle)
+		projectLinks = append(projectLinks, fmt.Sprintf("[%s](%s)", chainName, link))
+	}
+	
+	// For single network, show as "Network", for multiple show as "Links"
+	if len(networks) == 1 {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Network",
+			Value:  networks[0],
+			Inline: true,
+		})
+	}
+
+	if firstProject.Creator != "" {
+		creator, creatorUrl := formatAddressLink(firstProject.Creator, firstProject.ChainId, "v4")
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Creator",
+			Value:  fmt.Sprintf("[%s](%s)", creator, creatorUrl),
+			Inline: true,
+		})
+	}
+
+	if firstProject.Creator != firstProject.Owner && firstProject.Owner != "" {
+		owner, ownerUrl := formatAddressLink(firstProject.Owner, firstProject.ChainId, "v4")
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Owner",
+			Value:  fmt.Sprintf("[%s](%s)", owner, ownerUrl),
+			Inline: true,
+		})
+	}
+	
+	// If multiple networks, add links field instead of networks
+	if len(projectLinks) > 1 {
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   "Links",
+			Value:  strings.Join(projectLinks, " • "),
+			Inline: false,
+		})
+	}
+
+	title := fmt.Sprintf("New project: %s", m.Name)
+	
+	// Put tagline directly as description (no label)
+	var description string
+	if m.ProjectTagline != "" {
+		description = m.ProjectTagline
+	}
+
+	// Use the first project's link as the main URL
+	mainProjectLink := getProjectLink("v4", firstProject.ChainId, firstProject.ProjectId, firstProject.Handle)
+
+	return &discordgo.MessageEmbed{
+		Title:       title,
+		Description: description,
+		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		URL:         mainProjectLink,
+		Color:       getProjectColor("v4", firstProject.ChainId, firstProject.ProjectId),
+		Fields:      fields,
+	}
+}
+
+func getProjectLink(version string, chainId int, projectId int, handle string) string {
+	// v1 projects use handle
+	if version == "v1" {
+		return fmt.Sprintf("https://juicebox.money/p/%s", handle)
+	}
+	
+	// v2 and v3 projects use v2/p/ format
+	if version == "v2" || version == "v3" {
+		return fmt.Sprintf("https://juicebox.money/v2/p/%d", projectId)
+	}
+	
+	// v4 projects use v4/{network}:{projectId} format
+	if version == "v4" {
+		return fmt.Sprintf("https://juicebox.money/v4/%s:%d", getChainShortName(chainId), projectId)
+	}
+	
+	// Fallback
+	log.Printf("Unknown version: %s for project %d\n", version, projectId)
+	return fmt.Sprintf("https://juicebox.money/p/%d", projectId)
+}
+
+type ChainInfo struct {
+	Name        string
+	ShortName   string
+	ExplorerUrl string
+}
+
+var chains = map[int]ChainInfo{
+	1:     {"Ethereum", "eth", "https://etherscan.io"},
+	10:    {"Optimism", "op", "https://optimistic.etherscan.io"},
+	8453:  {"Base", "base", "https://basescan.org"},
+	42161: {"Arbitrum", "arb", "https://arbiscan.io"},
+}
+
+func getChainName(chainId int) string {
+	if chain, ok := chains[chainId]; ok {
+		return chain.Name
+	}
+	return fmt.Sprintf("Chain %d", chainId)
+}
+
+func getChainShortName(chainId int) string {
+	if chain, ok := chains[chainId]; ok {
+		return chain.ShortName
+	}
+	return fmt.Sprintf("chain%d", chainId)
+}
+
+func getExplorerUrl(chainId int, path string) string {
+	explorer := "https://etherscan.io" // fallback
+	if chain, ok := chains[chainId]; ok {
+		explorer = chain.ExplorerUrl
+	}
+	return fmt.Sprintf("%s/%s", explorer, path)
+}
+
+// Format address as a link with ENS resolution
+func formatAddressLink(address string, chainId int, version string) (string, string) {
+	// Get display name with combined ENS/truncation logic
+	var displayName string
+	
+	// Make sure address is valid before checking ENS
+	if len(address) == 42 && address[0:2] == "0x" {
+		// Try ENS resolution
+		resp, err := http.Get("https://api.ensideas.com/ens/resolve/" + address)
+		if err == nil {
+			defer resp.Body.Close()
+			respBody, err := io.ReadAll(resp.Body)
+			if err == nil {
+				var ensResp struct {
+					Name string `json:"name"`
+				}
+				if json.Unmarshal(respBody, &ensResp) == nil && ensResp.Name != "" {
+					displayName = ensResp.Name
+				}
+			}
+		}
+	}
+	
+	// Fallback to truncated address if no ENS name
+	if displayName == "" {
+		if len(address) < 10 {
+			displayName = address
+		} else {
+			displayName = fmt.Sprintf("%s...%s", address[:6], address[len(address)-4:])
+		}
+	}
+	
+	// Get URL based on version
+	var url string
+	if version == "v4" {
+		url = getExplorerUrl(chainId, fmt.Sprintf("address/%s", address))
+	} else {
+		url = fmt.Sprintf("https://juicebox.money/account/%s", address)
+	}
+	
+	return displayName, url
+}
+
+// IPFS URL patterns used by both extract and remove functions
+var ipfsPatterns = []string{
+	`https://[^\s]*\.infura-ipfs\.io/ipfs/[^\s]+`,
+	`https://[^\s]*/ipfs/[^\s]+`,
+	`ipfs://[^\s]+`,
+}
+
+// Extract first IPFS image URL from text
+func extractIPFSImage(text string) string {
+	for _, pattern := range ipfsPatterns {
+		if match := regexp.MustCompile(pattern).FindString(text); match != "" {
+			return strings.TrimSpace(match)
+		}
+	}
+	return ""
+}
+
+// Remove all IPFS URLs from text
+func removeIPFSUrls(text string) string {
+	result := text
+	for _, pattern := range ipfsPatterns {
+		result = regexp.MustCompile(pattern).ReplaceAllString(result, "")
+	}
+	return strings.TrimSpace(regexp.MustCompile(`\s+`).ReplaceAllString(result, " "))
+}
+
+// Generate deterministic color based on project identity
+func getProjectColor(version string, chainId int, projectId int) int {
+	// Create a hash input from version, chainId, and projectId
+	input := fmt.Sprintf("%s:%d:%d", version, chainId, projectId)
+	hash := sha256.Sum256([]byte(input))
+	
+	// Use first 3 bytes of hash for RGB values
+	r := int(hash[0])
+	g := int(hash[1]) 
+	b := int(hash[2])
+	
+	// Convert to Discord color (24-bit integer)
+	color := (r << 16) | (g << 8) | b
+	
+	// Ensure it's not too dark by adding minimum brightness
+	if r+g+b < 180 {
+		// Brighten the color by adding to each component
+		brightR := min(255, r+60)
+		brightG := min(255, g+60)
+		brightB := min(255, b+60)
+		color = (brightR << 16) | (brightG << 8) | brightB
+	}
+	
+	return color
+}
+
+
+// Parse fixed point string with optional precision. If precision is -1, uses smart formatting
 func parseFixedPointString(s string, decimals int64, precision int) (string, error) {
 	bf, ok := new(big.Float).SetString(s)
 	if !ok {
@@ -455,6 +896,28 @@ func parseFixedPointString(s string, decimals int64, precision int) (string, err
 	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(decimals), nil)
 	floatDivisor := new(big.Float).SetInt(divisor)
 	result := new(big.Float).Quo(bf, floatDivisor)
+
+	// Smart formatting (precision -1) - shows up to 5 decimals but doesn't pad with zeros
+	if precision == -1 {
+		// Check if the original value is exactly zero
+		if bf.Sign() == 0 {
+			return "0", nil
+		}
+
+		// Convert to string with max 5 decimals, then trim trailing zeros
+		formatted := result.Text('f', 5)
+		
+		// Handle very small amounts that round to 0 (but aren't actually 0)
+		if formatted == "0.00000" {
+			return "~0", nil
+		}
+		
+		// Remove trailing zeros and decimal point if not needed
+		formatted = strings.TrimRight(formatted, "0")
+		formatted = strings.TrimRight(formatted, ".")
+		
+		return formatted, nil
+	}
 
 	return result.Text('f', precision), nil
 }
@@ -489,38 +952,6 @@ func getMetadataForUri(uri string) (*Metadata, error) {
 	return &m, nil
 }
 
-type ENSResponse struct {
-	Name string `json:"name"`
-}
-
-func getEnsForAddress(address string) (string, error) {
-	// Make sure address is a valid address
-	if len(address) != 42 || address[0:2] != "0x" {
-		return "", fmt.Errorf("invalid address")
-	}
-
-	resp, err := http.Get("https://api.ensideas.com/ens/resolve/" + address)
-	if err != nil {
-		return "", fmt.Errorf("error getting ENS name: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("error reading ENS response body: %w", err)
-	}
-
-	var r ENSResponse
-	if err = json.Unmarshal(respBody, &r); err != nil {
-		return "", fmt.Errorf("error unmarshalling ENS response body: %w", err)
-	}
-
-	if r.Name == "" {
-		return "", fmt.Errorf("no ENS name found")
-	}
-
-	return r.Name, nil
-}
 
 func getUrlFromUri(uri string) string {
 	// Check if the URI is already a URL.
@@ -584,10 +1015,12 @@ func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, ha
 
 func createPlaceholderCacheValue(projectId string, handle string, pv string) *MetadataCacheValue {
 	metadata := &Metadata{Name: fmt.Sprintf("Project %s", projectId)}
-	if pv == "2" {
+	if pv == "v4" {
+		metadata.Name = fmt.Sprintf("Project %s (v4)", projectId)
+	} else if pv == "v3" || pv == "2" {
 		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
-	} else if pv == "1" {
-		metadata.Name += "(v1)"
+	} else if pv == "v1" || pv == "1" {
+		metadata.Name += " (v1)"
 		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/p/%s", handle)
 	}
 
