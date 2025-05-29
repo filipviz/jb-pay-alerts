@@ -252,6 +252,7 @@ func v4PayEvents(since time.Time, bendystrawUrl string) (*V4PayEventsResponse, e
 					metadataUri
 					creator
 					owner
+					isRevnet
 				}
 			}
 		}
@@ -273,6 +274,7 @@ func v4NewProjects(since time.Time, bendystrawUrl string) (*V4ProjectsResponse, 
 				metadataUri
 				creator
 				owner
+				isRevnet
 			}
 		}
 	}`, since.Unix())
@@ -280,10 +282,15 @@ func v4NewProjects(since time.Time, bendystrawUrl string) (*V4ProjectsResponse, 
 }
 
 // Check if a pay event matches a config string
-func matchesPayEventConfig(configKey string, projectId int, chainId int, version string) bool {
+func matchesPayEventConfig(configKey string, projectId int, chainId int, version string, isRevnet bool) bool {
 	// Handle global wildcard - all payments across all versions
 	if configKey == "pay" {
 		return true
+	}
+	
+	// Handle revnet payments - only v4 projects with isRevnet = true
+	if configKey == "revnet" {
+		return version == "4" && isRevnet
 	}
 	
 	// Handle v4 format: chainId:projectId
@@ -331,7 +338,7 @@ func processV3PayEvent(event PayEvent, config map[string][]string, metadataCache
 
 	for channel, configKeys := range config {
 		for _, configKey := range configKeys {
-			if matchesPayEventConfig(configKey, event.ProjectId, 1, event.Pv) {
+			if matchesPayEventConfig(configKey, event.ProjectId, 1, event.Pv, false) {
 				go func(channelID string) {
 					_, err := s.ChannelMessageSendEmbed(channelID, formatV3PayEvent(event, metadata))
 					if err != nil {
@@ -349,16 +356,18 @@ func processV4PayEvent(event PayEventV4, config map[string][]string, metadataCac
 	cacheKey := fmt.Sprintf("v4:%d:%d", event.ChainId, event.ProjectId)
 	
 	var metadataUri, handle string
+	var isRevnet bool
 	if event.Project != nil {
 		metadataUri = event.Project.MetadataUri
 		handle = event.Project.Handle
+		isRevnet = event.Project.IsRevnet
 	}
 	
 	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, "4")
 
 	for channel, configKeys := range config {
 		for _, configKey := range configKeys {
-			if matchesPayEventConfig(configKey, event.ProjectId, event.ChainId, "4") {
+			if matchesPayEventConfig(configKey, event.ProjectId, event.ChainId, "4", isRevnet) {
 				go func(channelID string) {
 					_, err := s.ChannelMessageSendEmbed(channelID, formatV4PayEvent(event, metadata))
 					if err != nil {
@@ -405,7 +414,7 @@ func processV4ProjectGroup(projectGroup []ProjectV4, config map[string][]string,
 
 	for channel, configKeys := range config {
 		for _, configKey := range configKeys {
-			if configKey == "new" {
+			if configKey == "new" || (configKey == "revnet" && firstProject.IsRevnet) {
 				go func(channelID string) {
 					_, err := s.ChannelMessageSendEmbed(channelID, formatV4ProjectGroup(projectGroup, metadata))
 					if err != nil {
@@ -714,7 +723,10 @@ func formatV4ProjectGroup(projectGroup []ProjectV4, m Metadata) *discordgo.Messa
 	}
 
 	title := fmt.Sprintf("New project: %s", m.Name)
-	
+	if firstProject.IsRevnet {
+		title = fmt.Sprintf("New revnet: %s", m.Name)
+	}
+
 	// Put tagline directly as description (no label)
 	var description string
 	if m.ProjectTagline != "" {

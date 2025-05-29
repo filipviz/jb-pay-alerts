@@ -43,6 +43,7 @@ type PayEventV4 struct {
 		MetadataUri string `json:"metadataUri"`
 		Creator     string `json:"creator"`
 		Owner       string `json:"owner"`
+		IsRevnet    bool   `json:"isRevnet"`
 	} `json:"project"`
 }
 
@@ -81,6 +82,7 @@ type ProjectV4 struct {
 	MetadataUri string `json:"metadataUri"`
 	Creator     string `json:"creator"`
 	Owner       string `json:"owner"`
+	IsRevnet    bool   `json:"isRevnet"`
 }
 
 type V4ProjectsResponse struct {

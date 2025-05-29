@@ -24,9 +24,10 @@ Map Discord channel IDs to notification rules in `config.json`:
 
 ```json
 {
-    "channel_id_1": ["pay", "25", "1:83"],
+    "channel_id_1": ["25", "1:83"],
     "channel_id_2": ["new"],
-    "channel_id_3": ["10:456"]
+    "channel_id_3": ["10:456"],
+    "channel_id_4": ["pay"]
 }
 ```
 
@@ -34,6 +35,7 @@ Map Discord channel IDs to notification rules in `config.json`:
 |------|-------------|
 | `"new"` | Notifications when new projects are made |
 | `"pay"` | Notifications when any project is paid |
+| `"revnet"` | Notifications for Revnet payments and new Revnets |
 | `"25"` | Notifications when project 25 on v2/v3 is paid |
 | `"1:83"` | Notifications when mainnet project 83 on v4 is paid |
 | `"10:456"` | Notification when Optimism project 456 on v4 is paid |
