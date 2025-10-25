@@ -9,7 +9,7 @@ type GraphQLRequest struct {
 // V3 PayEvent (from subgraph)
 type PayEvent struct {
 	Pv          string `json:"pv"`
-	ProjectId   int    `json:"projectId"`
+	ProjectID   int    `json:"projectId"`
 	Amount      string `json:"amount"`
 	AmountUSD   string `json:"amountUSD"`
 	Timestamp   int    `json:"timestamp"`
@@ -17,7 +17,7 @@ type PayEvent struct {
 	Note        string `json:"note"`
 	TxHash      string `json:"txHash"`
 	Project     struct {
-		MetadataUri string `json:"metadataUri"`
+		MetadataURI string `json:"metadataUri"`
 		Handle      string `json:"handle"`
 	} `json:"project"`
 }
@@ -30,11 +30,11 @@ type V3PayEventsResponse struct {
 
 // Bendystraw PayEvent (supports Juicebox v4 and v5 projects)
 type BendyPayEvent struct {
-	ChainId     int    `json:"chainId"`
-	ProjectId   int    `json:"projectId"`
+	ChainID     int    `json:"chainId"`
+	ProjectID   int    `json:"projectId"`
 	Version     int    `json:"version"`
 	Amount      string `json:"amount"`
-	AmountUsd   string `json:"amountUsd"`
+	AmountUSD   string `json:"amountUsd"`
 	Timestamp   int    `json:"timestamp"`
 	Beneficiary string `json:"beneficiary"`
 	TxHash      string `json:"txHash"`
@@ -43,12 +43,12 @@ type BendyPayEvent struct {
 	From        string `json:"from"`
 	Project     *struct {
 		Handle        string  `json:"handle"`
-		MetadataUri   string  `json:"metadataUri"`
+		MetadataURI   string  `json:"metadataUri"`
 		Creator       string  `json:"creator"`
 		Owner         string  `json:"owner"`
 		IsRevnet      bool    `json:"isRevnet"`
 		Version       int     `json:"version"`
-		SuckerGroupId string  `json:"suckerGroupId"`
+		SuckerGroupID string  `json:"suckerGroupId"`
 		Token         string  `json:"token"`
 		TokenSymbol   *string `json:"tokenSymbol"`
 		Decimals      *int    `json:"decimals"`
@@ -67,8 +67,8 @@ type BendyPayEventsResponse struct {
 type Project struct {
 	Pv          string `json:"pv"`
 	Handle      string `json:"handle"`
-	ProjectId   int    `json:"projectId"`
-	MetadataUri string `json:"metadataUri"`
+	ProjectID   int    `json:"projectId"`
+	MetadataURI string `json:"metadataUri"`
 	Creator     string `json:"creator"`
 	Owner       string `json:"owner"`
 	InitEvents  []struct {
@@ -84,15 +84,15 @@ type V3ProjectsResponse struct {
 
 // Bendystraw Project (supports Juicebox v4 and v5 projects)
 type BendyProject struct {
-	ChainId             int    `json:"chainId"`
-	ProjectId           int    `json:"projectId"`
+	ChainID             int    `json:"chainId"`
+	ProjectID           int    `json:"projectId"`
 	Version             int    `json:"version"`
 	Handle              string `json:"handle"`
-	MetadataUri         string `json:"metadataUri"`
+	MetadataURI         string `json:"metadataUri"`
 	Creator             string `json:"creator"`
 	Owner               string `json:"owner"`
 	IsRevnet            bool   `json:"isRevnet"`
-	SuckerGroupId       string `json:"suckerGroupId"`
+	SuckerGroupID       string `json:"suckerGroupId"`
 	ProjectCreateEvents struct {
 		Items []struct {
 			TxHash string `json:"txHash"`
@@ -110,14 +110,14 @@ type BendyProjectsResponse struct {
 
 type Metadata struct {
 	Name           string `json:"name"`
-	InfoUri        string `json:"infoUri"`
-	LogoUri        string `json:"logoUri"`
+	InfoURI        string `json:"infoUri"`
+	LogoURI        string `json:"logoUri"`
 	Description    string `json:"description"`
 	ProjectTagline string `json:"projectTagline"`
 }
 
 type MetadataCacheValue struct {
-	MetadataIPFSUri string
+	MetadataIPFSURI string
 	Metadata        Metadata
 	ready           chan struct{} // Closed when metadata is ready.
 }

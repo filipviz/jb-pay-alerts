@@ -36,13 +36,13 @@ func main() {
 	}
 
 	// The subgraph provides events for Juicebox v1, v2, and v3.
-	subgraphUrl := os.Getenv("SUBGRAPH_URL")
-	if subgraphUrl == "" {
+	subgraphURL := os.Getenv("SUBGRAPH_URL")
+	if subgraphURL == "" {
 		log.Fatalln("Could not find SUBGRAPH_URL in .env file")
 	}
 	// Bendystraw provides events for Juicebox v4 and v5.
-	bendystrawUrl := os.Getenv("BENDYSTRAW_URL")
-	if bendystrawUrl == "" {
+	bendystrawURL := os.Getenv("BENDYSTRAW_URL")
+	if bendystrawURL == "" {
 		log.Fatalln("Could not find BENDYSTRAW_URL in .env file")
 	}
 
@@ -96,20 +96,20 @@ func main() {
 	}
 
 	processOnce := func(since time.Time) {
-		payResp, err := v3PayEvents(since, subgraphUrl)
+		payResp, err := v3PayEvents(since, subgraphURL)
 		if err != nil {
 			log.Printf("Failed to get v3 pay events: %v\n", err)
 		}
-		projResp, err := v3NewProjects(since, subgraphUrl)
+		projResp, err := v3NewProjects(since, subgraphURL)
 		if err != nil {
 			log.Printf("Failed to get new v3 projects: %v\n", err)
 		}
 
-		payRespBendy, err := bendyPayEvents(since, bendystrawUrl)
+		payRespBendy, err := bendyPayEvents(since, bendystrawURL)
 		if err != nil {
 			log.Printf("Failed to get bendystraw pay events: %v\n", err)
 		}
-		projRespBendy, err := bendyProjects(since, bendystrawUrl)
+		projRespBendy, err := bendyProjects(since, bendystrawURL)
 		if err != nil {
 			log.Printf("Failed to get new bendystraw projects: %v\n", err)
 		}
@@ -269,7 +269,7 @@ func makeGraphQLRequest[T any](url, query string) (*T, error) {
 	return &result, nil
 }
 
-func v3PayEvents(since time.Time, subgraphUrl string) (*V3PayEventsResponse, error) {
+func v3PayEvents(since time.Time, subgraphURL string) (*V3PayEventsResponse, error) {
 	query := fmt.Sprintf(`{
 		payEvents(
 		  first: 1000
@@ -290,10 +290,10 @@ func v3PayEvents(since time.Time, subgraphUrl string) (*V3PayEventsResponse, err
 			}
 		}
 	}`, since.Unix())
-	return makeGraphQLRequest[V3PayEventsResponse](subgraphUrl, query)
+	return makeGraphQLRequest[V3PayEventsResponse](subgraphURL, query)
 }
 
-func v3NewProjects(since time.Time, subgraphUrl string) (*V3ProjectsResponse, error) {
+func v3NewProjects(since time.Time, subgraphURL string) (*V3ProjectsResponse, error) {
 	query := fmt.Sprintf(`{
 		projects(
 		  first: 1000
@@ -311,10 +311,10 @@ func v3NewProjects(since time.Time, subgraphUrl string) (*V3ProjectsResponse, er
 		  }
 		}
 	}`, since.Unix())
-	return makeGraphQLRequest[V3ProjectsResponse](subgraphUrl, query)
+	return makeGraphQLRequest[V3ProjectsResponse](subgraphURL, query)
 }
 
-func bendyPayEvents(since time.Time, bendystrawUrl string) (*BendyPayEventsResponse, error) {
+func bendyPayEvents(since time.Time, bendystrawURL string) (*BendyPayEventsResponse, error) {
 	query := fmt.Sprintf(`{
 		payEvents(
 		  orderBy: "timestamp"
@@ -348,10 +348,10 @@ func bendyPayEvents(since time.Time, bendystrawUrl string) (*BendyPayEventsRespo
 			}
 		}
 	}`, since.Unix())
-	return makeGraphQLRequest[BendyPayEventsResponse](bendystrawUrl, query)
+	return makeGraphQLRequest[BendyPayEventsResponse](bendystrawURL, query)
 }
 
-func bendyProjects(since time.Time, bendystrawUrl string) (*BendyProjectsResponse, error) {
+func bendyProjects(since time.Time, bendystrawURL string) (*BendyProjectsResponse, error) {
 	query := fmt.Sprintf(`{
 		projects(
 		  orderBy: "createdAt"
@@ -380,19 +380,19 @@ func bendyProjects(since time.Time, bendystrawUrl string) (*BendyProjectsRespons
 			}
 		}
 	}`, since.Unix())
-	return makeGraphQLRequest[BendyProjectsResponse](bendystrawUrl, query)
+	return makeGraphQLRequest[BendyProjectsResponse](bendystrawURL, query)
 }
 
-// Group projects by suckerGroupId when present, otherwise fall back to metadata + creator + version
+// Group projects by suckerGroupID when present, otherwise fall back to metadata + creator + version
 func groupCrossChainProjects(projects []BendyProject) [][]BendyProject {
 	groups := make(map[string][]BendyProject)
 
 	for _, project := range projects {
-		key := project.SuckerGroupId
+		key := project.SuckerGroupID
 		if key != "" {
 			key = fmt.Sprintf("%s|v%d", key, project.Version)
 		} else {
-			key = fmt.Sprintf("v%d|%s|%s|%s", project.Version, project.MetadataUri, project.Creator, project.Handle)
+			key = fmt.Sprintf("v%d|%s|%s|%s", project.Version, project.MetadataURI, project.Creator, project.Handle)
 		}
 		groups[key] = append(groups[key], project)
 	}
@@ -407,8 +407,8 @@ func groupCrossChainProjects(projects []BendyProject) [][]BendyProject {
 
 // Process v3 pay event and send alerts to any matching channels
 func processV3PayEvent(event PayEvent, cfg *alertsConfig, metadataCache *MetadataCache, session *discordgo.Session) {
-	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectId)
-	metadata := memoizedMetadata(metadataCache, cacheKey, event.Project.MetadataUri, event.Project.Handle, event.Pv)
+	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectID)
+	metadata := memoizedMetadata(metadataCache, cacheKey, event.Project.MetadataURI, event.Project.Handle, event.Pv)
 
 	opts := payEmbedOptions{
 		memo:           event.Note,
@@ -419,28 +419,28 @@ func processV3PayEvent(event PayEvent, cfg *alertsConfig, metadataCache *Metadat
 		txHash:         event.TxHash,
 		projectVersion: event.Pv,
 		projectChain:   1,
-		projectID:      event.ProjectId,
+		projectID:      event.ProjectID,
 		handle:         event.Project.Handle,
 		tokenSymbol:    getNativeTokenSymbol(1),
 		tokenDecimals:  18,
 		showUSD:        true,
 	}
 	embed := buildPayEmbed(metadata, opts)
-	key := projectKey{version: "v3", chain: 1, project: event.ProjectId}
+	key := projectKey{version: "v3", chain: 1, project: event.ProjectID}
 	sendToChannels(session, embed, cfg.pay, cfg.projects[key])
 }
 
 // Process v4 pay event and send alerts to any matching channels
 func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache *MetadataCache, session *discordgo.Session) {
 	versionStr := strconv.Itoa(event.Version)
-	cacheKey := fmt.Sprintf("v%s:%d:%d", versionStr, event.ChainId, event.ProjectId)
+	cacheKey := fmt.Sprintf("v%s:%d:%d", versionStr, event.ChainID, event.ProjectID)
 
-	var metadataUri, handle string
+	var metadataURI, handle string
 	var isRevnet bool
 	tokenSymbol := ""
 	tokenDecimals := 18
 	if event.Project != nil {
-		metadataUri = event.Project.MetadataUri
+		metadataURI = event.Project.MetadataURI
 		handle = event.Project.Handle
 		isRevnet = event.Project.IsRevnet
 		if event.Project.Version != 0 {
@@ -454,35 +454,35 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 		}
 	}
 
-	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, versionStr)
+	metadata := memoizedMetadata(metadataCache, cacheKey, metadataURI, handle, versionStr)
 
 	versionLabel := fmt.Sprintf("v%s", versionStr)
-	nativeSymbol := getNativeTokenSymbol(event.ChainId)
+	nativeSymbol := getNativeTokenSymbol(event.ChainID)
 	if tokenDecimals <= 0 {
 		tokenDecimals = 18
 	}
 	if tokenSymbol == "" {
 		tokenSymbol = nativeSymbol
 	}
-	showUSD := event.AmountUsd != "" && event.AmountUsd != "0"
+	showUSD := event.AmountUSD != "" && event.AmountUSD != "0"
 	opts := payEmbedOptions{
 		memo:           event.Memo,
 		amount:         event.Amount,
-		amountUSD:      event.AmountUsd,
+		amountUSD:      event.AmountUSD,
 		beneficiary:    event.Beneficiary,
-		chainID:        event.ChainId,
+		chainID:        event.ChainID,
 		txHash:         event.TxHash,
 		projectVersion: versionStr,
-		projectChain:   event.ChainId,
-		projectID:      event.ProjectId,
+		projectChain:   event.ChainID,
+		projectID:      event.ProjectID,
 		handle:         handle,
-		networkName:    getChainName(event.ChainId),
+		networkName:    getChainName(event.ChainID),
 		tokenSymbol:    tokenSymbol,
 		tokenDecimals:  tokenDecimals,
 		showUSD:        showUSD,
 	}
 	embed := buildPayEmbed(metadata, opts)
-	key := projectKey{version: versionLabel, chain: event.ChainId, project: event.ProjectId}
+	key := projectKey{version: versionLabel, chain: event.ChainID, project: event.ProjectID}
 	if isRevnet {
 		sendToChannels(session, embed, cfg.pay, cfg.revnet, cfg.projects[key])
 	} else {
@@ -492,8 +492,8 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 
 // Process a new v3 project event and send alerts to any matching channels
 func processV3Project(event Project, cfg *alertsConfig, metadataCache *MetadataCache, session *discordgo.Session) {
-	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectId)
-	metadata := memoizedMetadata(metadataCache, cacheKey, event.MetadataUri, event.Handle, event.Pv)
+	cacheKey := fmt.Sprintf("%s:1:%d", event.Pv, event.ProjectID)
+	metadata := memoizedMetadata(metadataCache, cacheKey, event.MetadataURI, event.Handle, event.Pv)
 
 	embed := formatV3Project(event, metadata)
 	sendToChannels(session, embed, cfg.new)
@@ -509,8 +509,8 @@ func processBendyProjectGroup(projectGroup []BendyProject, cfg *alertsConfig, me
 	firstProject := projectGroup[0]
 	versionStr := strconv.Itoa(firstProject.Version)
 
-	cacheKey := fmt.Sprintf("v%s:group:%s:%s:%s", versionStr, firstProject.SuckerGroupId, firstProject.MetadataUri, firstProject.Creator)
-	metadata := memoizedMetadata(metadataCache, cacheKey, firstProject.MetadataUri, firstProject.Handle, versionStr)
+	cacheKey := fmt.Sprintf("v%s:group:%s:%s:%s", versionStr, firstProject.SuckerGroupID, firstProject.MetadataURI, firstProject.Creator)
+	metadata := memoizedMetadata(metadataCache, cacheKey, firstProject.MetadataURI, firstProject.Handle, versionStr)
 
 	embed := formatBendyProjectGroup(projectGroup, metadata)
 	if firstProject.IsRevnet {
@@ -544,7 +544,7 @@ func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
 	noteImage := ""
 	if memo != "" {
 		noteImage = extractIPFSImage(memo)
-		cleaned := removeIPFSUrls(memo)
+		cleaned := removeIPFSURLs(memo)
 		if cleaned != "" {
 			fields = append(fields, &discordgo.MessageEmbedField{Name: "Note", Value: cleaned, Inline: false})
 		}
@@ -580,7 +580,7 @@ func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
 	}
 
 	if opts.txHash != "" {
-		explorerURL := getExplorerUrl(opts.chainID, fmt.Sprintf("tx/%s", opts.txHash))
+		explorerURL := getExplorerURL(opts.chainID, fmt.Sprintf("tx/%s", opts.txHash))
 		fields = append(fields, &discordgo.MessageEmbedField{Name: "Transaction", Value: fmt.Sprintf("[Explorer](%s)", explorerURL), Inline: true})
 	}
 
@@ -588,7 +588,7 @@ func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
 
 	embed := &discordgo.MessageEmbed{
 		Title:     fmt.Sprintf("Payment to %s", m.Name),
-		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		Thumbnail: &discordgo.MessageEmbedThumbnail{URL: getURLFromURI(m.LogoURI)},
 		URL:       projectLink,
 		Color:     getProjectColor(opts.projectVersion, opts.projectChain, opts.projectID),
 		Fields:    fields,
@@ -605,36 +605,36 @@ func formatV3Project(event Project, m Metadata) *discordgo.MessageEmbed {
 	fields := make([]*discordgo.MessageEmbedField, 0, 5)
 
 	if event.Creator != "" {
-		creator, creatorUrl := formatAddressLink(event.Creator, 1)
+		creator, creatorURL := formatAddressLink(event.Creator, 1)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Creator",
-			Value:  fmt.Sprintf("[%s](%s)", creator, creatorUrl),
+			Value:  fmt.Sprintf("[%s](%s)", creator, creatorURL),
 			Inline: true,
 		})
 	}
 
 	if event.Creator != event.Owner && event.Owner != "" {
-		owner, ownerUrl := formatAddressLink(event.Owner, 1)
+		owner, ownerURL := formatAddressLink(event.Owner, 1)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Owner",
-			Value:  fmt.Sprintf("[%s](%s)", owner, ownerUrl),
+			Value:  fmt.Sprintf("[%s](%s)", owner, ownerURL),
 			Inline: true,
 		})
 	}
 
 	if len(event.InitEvents) > 0 && event.InitEvents[0].TxHash != "" {
-		explorerUrl := getExplorerUrl(1, fmt.Sprintf("tx/%s", event.InitEvents[0].TxHash))
+		explorerURL := getExplorerURL(1, fmt.Sprintf("tx/%s", event.InitEvents[0].TxHash))
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Transaction",
-			Value:  fmt.Sprintf("[Explorer](%s)", explorerUrl),
+			Value:  fmt.Sprintf("[Explorer](%s)", explorerURL),
 			Inline: true,
 		})
 	}
 
-	projectLink := getProjectLink(event.Pv, 1, event.ProjectId, event.Handle)
+	projectLink := getProjectLink(event.Pv, 1, event.ProjectID, event.Handle)
 	title := fmt.Sprintf("New project: %s", m.Name)
 
 	// Put tagline directly as description (no label)
@@ -646,9 +646,9 @@ func formatV3Project(event Project, m Metadata) *discordgo.MessageEmbed {
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
-		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getURLFromURI(m.LogoURI)},
 		URL:         projectLink,
-		Color:       getProjectColor(event.Pv, 1, event.ProjectId),
+		Color:       getProjectColor(event.Pv, 1, event.ProjectID),
 		Fields:      fields,
 	}
 }
@@ -667,12 +667,12 @@ func formatBendyProjectGroup(projectGroup []BendyProject, m Metadata) *discordgo
 	var networks []string
 	var projectLinks []string
 	for _, project := range projectGroup {
-		chainName := getChainName(project.ChainId)
+		chainName := getChainName(project.ChainID)
 		networks = append(networks, chainName)
 
 		// Add project links for each network
 		versionStr := strconv.Itoa(project.Version)
-		link := getProjectLink(versionStr, project.ChainId, project.ProjectId, project.Handle)
+		link := getProjectLink(versionStr, project.ChainID, project.ProjectID, project.Handle)
 		projectLinks = append(projectLinks, fmt.Sprintf("[%s](%s)", chainName, link))
 	}
 
@@ -686,21 +686,21 @@ func formatBendyProjectGroup(projectGroup []BendyProject, m Metadata) *discordgo
 	}
 
 	if firstProject.Creator != "" {
-		creator, creatorUrl := formatAddressLink(firstProject.Creator, firstProject.ChainId)
+		creator, creatorURL := formatAddressLink(firstProject.Creator, firstProject.ChainID)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Creator",
-			Value:  fmt.Sprintf("[%s](%s)", creator, creatorUrl),
+			Value:  fmt.Sprintf("[%s](%s)", creator, creatorURL),
 			Inline: true,
 		})
 	}
 
 	if firstProject.Creator != firstProject.Owner && firstProject.Owner != "" {
-		owner, ownerUrl := formatAddressLink(firstProject.Owner, firstProject.ChainId)
+		owner, ownerURL := formatAddressLink(firstProject.Owner, firstProject.ChainID)
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   "Owner",
-			Value:  fmt.Sprintf("[%s](%s)", owner, ownerUrl),
+			Value:  fmt.Sprintf("[%s](%s)", owner, ownerURL),
 			Inline: true,
 		})
 	}
@@ -710,7 +710,7 @@ func formatBendyProjectGroup(projectGroup []BendyProject, m Metadata) *discordgo
 		if tx != "" {
 			fields = append(fields, &discordgo.MessageEmbedField{
 				Name:   "Transaction",
-				Value:  fmt.Sprintf("[Explorer](%s)", getExplorerUrl(firstProject.ChainId, fmt.Sprintf("tx/%s", tx))),
+				Value:  fmt.Sprintf("[Explorer](%s)", getExplorerURL(firstProject.ChainID, fmt.Sprintf("tx/%s", tx))),
 				Inline: true,
 			})
 		}
@@ -738,19 +738,19 @@ func formatBendyProjectGroup(projectGroup []BendyProject, m Metadata) *discordgo
 
 	// Use the first project's link as the main URL
 	versionStr := strconv.Itoa(firstProject.Version)
-	mainProjectLink := getProjectLink(versionStr, firstProject.ChainId, firstProject.ProjectId, firstProject.Handle)
+	mainProjectLink := getProjectLink(versionStr, firstProject.ChainID, firstProject.ProjectID, firstProject.Handle)
 
 	return &discordgo.MessageEmbed{
 		Title:       title,
 		Description: description,
-		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getUrlFromUri(m.LogoUri)},
+		Thumbnail:   &discordgo.MessageEmbedThumbnail{URL: getURLFromURI(m.LogoURI)},
 		URL:         mainProjectLink,
-		Color:       getProjectColor(versionStr, firstProject.ChainId, firstProject.ProjectId),
+		Color:       getProjectColor(versionStr, firstProject.ChainID, firstProject.ProjectID),
 		Fields:      fields,
 	}
 }
 
-func getProjectLink(version string, chainId int, projectId int, handle string) string {
+func getProjectLink(version string, chainID int, projectID int, handle string) string {
 	// v1 projects use handle
 	if version == "1" {
 		return fmt.Sprintf("https://juicebox.money/p/%s", handle)
@@ -758,23 +758,23 @@ func getProjectLink(version string, chainId int, projectId int, handle string) s
 
 	// v2 and v3 projects use v2/p/ format
 	if version == "2" || version == "3" {
-		return fmt.Sprintf("https://juicebox.money/v2/p/%d", projectId)
+		return fmt.Sprintf("https://juicebox.money/v2/p/%d", projectID)
 	}
 
 	// v4+ projects share the v{version}/{network}:{projectId} format
 	if numericVersion, err := strconv.Atoi(version); err == nil && numericVersion >= 4 {
-		return fmt.Sprintf("https://juicebox.money/v%d/%s:%d", numericVersion, getChainShortName(chainId), projectId)
+		return fmt.Sprintf("https://juicebox.money/v%d/%s:%d", numericVersion, getChainShortName(chainID), projectID)
 	}
 
 	// Fallback
-	log.Printf("Unknown version: %s for project %d\n", version, projectId)
-	return fmt.Sprintf("https://juicebox.money/p/%d", projectId)
+	log.Printf("Unknown version: %s for project %d\n", version, projectID)
+	return fmt.Sprintf("https://juicebox.money/p/%d", projectID)
 }
 
 type ChainInfo struct {
 	Name         string
 	ShortName    string
-	ExplorerUrl  string
+	ExplorerURL  string
 	NativeSymbol string
 }
 
@@ -789,42 +789,42 @@ var addressLabels = map[string]string{
 	"0x755ff2f75a0a586ecfa2b9a3c959cb662458a105": "Juicebox Deployer",
 }
 
-func getChainName(chainId int) string {
-	if chain, ok := chains[chainId]; ok {
+func getChainName(chainID int) string {
+	if chain, ok := chains[chainID]; ok {
 		return chain.Name
 	}
-	return fmt.Sprintf("Chain %d", chainId)
+	return fmt.Sprintf("Chain %d", chainID)
 }
 
-func getChainShortName(chainId int) string {
-	if chain, ok := chains[chainId]; ok {
+func getChainShortName(chainID int) string {
+	if chain, ok := chains[chainID]; ok {
 		return chain.ShortName
 	}
-	return fmt.Sprintf("chain%d", chainId)
+	return fmt.Sprintf("chain%d", chainID)
 }
 
-func getNativeTokenSymbol(chainId int) string {
-	if chain, ok := chains[chainId]; ok && chain.NativeSymbol != "" {
+func getNativeTokenSymbol(chainID int) string {
+	if chain, ok := chains[chainID]; ok && chain.NativeSymbol != "" {
 		return chain.NativeSymbol
 	}
 	return "ETH"
 }
 
-func getExplorerUrl(chainId int, path string) string {
+func getExplorerURL(chainID int, path string) string {
 	explorer := "https://etherscan.io" // fallback
-	if chain, ok := chains[chainId]; ok {
-		explorer = chain.ExplorerUrl
+	if chain, ok := chains[chainID]; ok {
+		explorer = chain.ExplorerURL
 	}
 	return fmt.Sprintf("%s/%s", explorer, path)
 }
 
 // Format address as a link with ENS resolution
-func formatAddressLink(address string, chainId int) (string, string) {
+func formatAddressLink(address string, chainID int) (string, string) {
 	// Get display name with combined ENS/truncation logic
 	var displayName string
 	lower := strings.ToLower(address)
 	if label, ok := addressLabels[lower]; ok {
-		return label, getExplorerUrl(chainId, fmt.Sprintf("address/%s", address))
+		return label, getExplorerURL(chainID, fmt.Sprintf("address/%s", address))
 	}
 
 	// Make sure address is valid before checking ENS
@@ -854,7 +854,7 @@ func formatAddressLink(address string, chainId int) (string, string) {
 		}
 	}
 
-	return displayName, getExplorerUrl(chainId, fmt.Sprintf("address/%s", address))
+	return displayName, getExplorerURL(chainID, fmt.Sprintf("address/%s", address))
 }
 
 // IPFS URL patterns used by both extract and remove functions
@@ -875,7 +875,7 @@ func extractIPFSImage(text string) string {
 }
 
 // Remove all IPFS URLs from text
-func removeIPFSUrls(text string) string {
+func removeIPFSURLs(text string) string {
 	result := text
 	for _, pattern := range ipfsPatterns {
 		result = regexp.MustCompile(pattern).ReplaceAllString(result, "")
@@ -884,9 +884,9 @@ func removeIPFSUrls(text string) string {
 }
 
 // Generate deterministic color based on project identity
-func getProjectColor(version string, chainId int, projectId int) int {
-	// Create a hash input from version, chainId, and projectId
-	input := fmt.Sprintf("%s:%d:%d", version, chainId, projectId)
+func getProjectColor(version string, chainID int, projectID int) int {
+	// Create a hash input from version, chainID, and projectID
+	input := fmt.Sprintf("%s:%d:%d", version, chainID, projectID)
 	hash := sha256.Sum256([]byte(input))
 
 	// Use first 3 bytes of hash for RGB values
@@ -945,13 +945,13 @@ func parseFixedPointString(s string, decimals int64, precision int) (string, err
 	return result.Text('f', precision), nil
 }
 
-func getMetadataForUri(uri string) (*Metadata, error) {
-	metadataUrl := getUrlFromUri(uri)
+func getMetadataForURI(uri string) (*Metadata, error) {
+	metadataURL := getURLFromURI(uri)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataUrl, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error creating request to IPFS: %w", err)
 	}
@@ -975,7 +975,7 @@ func getMetadataForUri(uri string) (*Metadata, error) {
 	return &m, nil
 }
 
-func getUrlFromUri(uri string) string {
+func getURLFromURI(uri string) string {
 	// Check if the URI is already a URL.
 	if len(uri) >= 4 && uri[0:4] == "http" {
 		oldEndpoint := "https://jbx.mypinata.cloud/ipfs/"
@@ -996,15 +996,15 @@ func getUrlFromUri(uri string) string {
 	return IPFS_ENDPOINT + uri
 }
 
-func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, handle string, pv string) Metadata {
+func memoizedMetadata(m *MetadataCache, projectID string, metadataURI string, handle string, pv string) Metadata {
 	m.Lock()
-	cacheValue := m.Map[projectId]
+	cacheValue := m.Map[projectID]
 
 	// If the cache value exists but the IPFS URI has changed, invalidate the currently cached value.
 	if cacheValue != nil {
 		select {
 		case <-cacheValue.ready:
-			if cacheValue.MetadataIPFSUri != metadataUri {
+			if cacheValue.MetadataIPFSURI != metadataURI {
 				cacheValue = nil
 			}
 		default:
@@ -1014,15 +1014,15 @@ func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, ha
 	// If there is no valid cache value, create a new one.
 	if cacheValue == nil {
 		// Create placeholder metadata (and new ready chan).
-		cacheValue = createPlaceholderCacheValue(projectId, handle, pv)
-		m.Map[projectId] = cacheValue
+		cacheValue = createPlaceholderCacheValue(projectID, handle, pv)
+		m.Map[projectID] = cacheValue
 		m.Unlock()
 
-		if metadataUri != "" {
+		if metadataURI != "" {
 			// If there is a metadata URI, get the metadata from IPFS.
-			newMetadata, err := getMetadataForUri(metadataUri)
+			newMetadata, err := getMetadataForURI(metadataURI)
 			if err != nil {
-				log.Printf("Failed to fetch metadata for project %s (using placeholder): %v\n", projectId, err)
+				log.Printf("Failed to fetch metadata for project %s (using placeholder): %v\n", projectID, err)
 			} else {
 				cacheValue.Metadata = *newMetadata
 			}
@@ -1037,20 +1037,20 @@ func memoizedMetadata(m *MetadataCache, projectId string, metadataUri string, ha
 	return cacheValue.Metadata
 }
 
-func createPlaceholderCacheValue(projectId string, handle string, pv string) *MetadataCacheValue {
-	metadata := &Metadata{Name: fmt.Sprintf("Project %s", projectId)}
+func createPlaceholderCacheValue(projectID string, handle string, pv string) *MetadataCacheValue {
+	metadata := &Metadata{Name: fmt.Sprintf("Project %s", projectID)}
 	switch pv {
 	case "5", "4":
-		metadata.Name = fmt.Sprintf("Project %s (v%s)", projectId, pv)
+		metadata.Name = fmt.Sprintf("Project %s (v%s)", projectID, pv)
 	case "3", "2":
-		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectId)
+		metadata.InfoURI = fmt.Sprintf("https://juicebox.money/v2/p/%s", projectID)
 	case "1":
 		metadata.Name += " (v1)"
-		metadata.InfoUri = fmt.Sprintf("https://juicebox.money/p/%s", handle)
+		metadata.InfoURI = fmt.Sprintf("https://juicebox.money/p/%s", handle)
 	}
 
 	return &MetadataCacheValue{
-		MetadataIPFSUri: "",
+		MetadataIPFSURI: "",
 		Metadata:        *metadata,
 		ready:           make(chan struct{}),
 	}
