@@ -423,7 +423,6 @@ func processV3PayEvent(event PayEvent, cfg *alertsConfig, metadataCache *Metadat
 		handle:         event.Project.Handle,
 		tokenSymbol:    getNativeTokenSymbol(1),
 		tokenDecimals:  18,
-		showUSD:        true,
 	}
 	embed := buildPayEmbed(metadata, opts)
 	key := projectKey{version: "v3", chain: 1, project: event.ProjectID}
@@ -464,7 +463,6 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 	if tokenSymbol == "" {
 		tokenSymbol = nativeSymbol
 	}
-	showUSD := event.AmountUSD != "" && event.AmountUSD != "0"
 	opts := payEmbedOptions{
 		memo:           event.Memo,
 		amount:         event.Amount,
@@ -479,7 +477,6 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 		networkName:    getChainName(event.ChainID),
 		tokenSymbol:    tokenSymbol,
 		tokenDecimals:  tokenDecimals,
-		showUSD:        showUSD,
 	}
 	embed := buildPayEmbed(metadata, opts)
 	key := projectKey{version: versionLabel, chain: event.ChainID, project: event.ProjectID}
@@ -534,7 +531,6 @@ type payEmbedOptions struct {
 	networkName    string
 	tokenSymbol    string
 	tokenDecimals  int
-	showUSD        bool
 }
 
 func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
@@ -561,9 +557,11 @@ func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
 		}
 		if amountStr, err := parseFixedPointString(opts.amount, decimals, -1); err == nil {
 			value := fmt.Sprintf("%s %s", amountStr, symbol)
-			if opts.showUSD && opts.amountUSD != "" && opts.amountUSD != "0" {
-				if amountUsdStr, errUsd := parseFixedPointString(opts.amountUSD, 18, 2); errUsd == nil && amountUsdStr != "0" && amountUsdStr != "0.00" {
-					value = fmt.Sprintf("%s %s ($%s USD)", amountStr, symbol, amountUsdStr)
+			if opts.amountUSD != "" && opts.amountUSD != "0" {
+				if amountUsdStr, errUsd := parseFixedPointString(opts.amountUSD, 18, 2); errUsd == nil {
+					if amountUsdStr != "0" && amountUsdStr != "0.00" && !strings.HasPrefix(amountUsdStr, "~0") {
+						value = fmt.Sprintf("%s %s ($%s USD)", amountStr, symbol, amountUsdStr)
+					}
 				}
 			}
 			fields = append(fields, &discordgo.MessageEmbedField{Name: "Amount", Value: value, Inline: true})
