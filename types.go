@@ -42,13 +42,16 @@ type BendyPayEvent struct {
 	Caller      string `json:"caller"`
 	From        string `json:"from"`
 	Project     *struct {
-		Handle        string `json:"handle"`
-		MetadataUri   string `json:"metadataUri"`
-		Creator       string `json:"creator"`
-		Owner         string `json:"owner"`
-		IsRevnet      bool   `json:"isRevnet"`
-		Version       int    `json:"version"`
-		SuckerGroupId string `json:"suckerGroupId"`
+		Handle        string  `json:"handle"`
+		MetadataUri   string  `json:"metadataUri"`
+		Creator       string  `json:"creator"`
+		Owner         string  `json:"owner"`
+		IsRevnet      bool    `json:"isRevnet"`
+		Version       int     `json:"version"`
+		SuckerGroupId string  `json:"suckerGroupId"`
+		Token         string  `json:"token"`
+		TokenSymbol   *string `json:"tokenSymbol"`
+		Decimals      *int    `json:"decimals"`
 	} `json:"project"`
 }
 

@@ -341,6 +341,9 @@ func bendyPayEvents(since time.Time, bendystrawUrl string) (*BendyPayEventsRespo
 					isRevnet
 					version
 					suckerGroupId
+					token
+					tokenSymbol
+					decimals
 				}
 			}
 		}
@@ -418,6 +421,9 @@ func processV3PayEvent(event PayEvent, cfg *alertsConfig, metadataCache *Metadat
 		projectChain:   1,
 		projectID:      event.ProjectId,
 		handle:         event.Project.Handle,
+		tokenSymbol:    getNativeTokenSymbol(1),
+		tokenDecimals:  18,
+		showUSD:        true,
 	}
 	embed := buildPayEmbed(metadata, opts)
 	key := projectKey{version: "v3", chain: 1, project: event.ProjectId}
@@ -431,6 +437,8 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 
 	var metadataUri, handle string
 	var isRevnet bool
+	tokenSymbol := ""
+	tokenDecimals := 18
 	if event.Project != nil {
 		metadataUri = event.Project.MetadataUri
 		handle = event.Project.Handle
@@ -438,11 +446,25 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 		if event.Project.Version != 0 {
 			versionStr = strconv.Itoa(event.Project.Version)
 		}
+		if event.Project.TokenSymbol != nil {
+			tokenSymbol = *event.Project.TokenSymbol
+		}
+		if event.Project.Decimals != nil && *event.Project.Decimals > 0 {
+			tokenDecimals = *event.Project.Decimals
+		}
 	}
 
 	metadata := memoizedMetadata(metadataCache, cacheKey, metadataUri, handle, versionStr)
 
 	versionLabel := fmt.Sprintf("v%s", versionStr)
+	nativeSymbol := getNativeTokenSymbol(event.ChainId)
+	if tokenDecimals <= 0 {
+		tokenDecimals = 18
+	}
+	if tokenSymbol == "" {
+		tokenSymbol = nativeSymbol
+	}
+	showUSD := event.AmountUsd != "" && event.AmountUsd != "0"
 	opts := payEmbedOptions{
 		memo:           event.Memo,
 		amount:         event.Amount,
@@ -455,6 +477,9 @@ func processBendyPayEvent(event BendyPayEvent, cfg *alertsConfig, metadataCache 
 		projectID:      event.ProjectId,
 		handle:         handle,
 		networkName:    getChainName(event.ChainId),
+		tokenSymbol:    tokenSymbol,
+		tokenDecimals:  tokenDecimals,
+		showUSD:        showUSD,
 	}
 	embed := buildPayEmbed(metadata, opts)
 	key := projectKey{version: versionLabel, chain: event.ChainId, project: event.ProjectId}
@@ -507,6 +532,9 @@ type payEmbedOptions struct {
 	projectID      int
 	handle         string
 	networkName    string
+	tokenSymbol    string
+	tokenDecimals  int
+	showUSD        bool
 }
 
 func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
@@ -523,11 +551,19 @@ func buildPayEmbed(m Metadata, opts payEmbedOptions) *discordgo.MessageEmbed {
 	}
 
 	if opts.amount != "" {
-		if amountStr, err := parseFixedPointString(opts.amount, 18, -1); err == nil {
-			value := fmt.Sprintf("%s ETH", amountStr)
-			if opts.amountUSD != "" {
-				if amountUsdStr, errUsd := parseFixedPointString(opts.amountUSD, 18, 2); errUsd == nil {
-					value = fmt.Sprintf("%s ETH ($%s USD)", amountStr, amountUsdStr)
+		decimals := int64(opts.tokenDecimals)
+		if decimals <= 0 {
+			decimals = 18
+		}
+		symbol := opts.tokenSymbol
+		if symbol == "" {
+			symbol = getNativeTokenSymbol(opts.chainID)
+		}
+		if amountStr, err := parseFixedPointString(opts.amount, decimals, -1); err == nil {
+			value := fmt.Sprintf("%s %s", amountStr, symbol)
+			if opts.showUSD && opts.amountUSD != "" && opts.amountUSD != "0" {
+				if amountUsdStr, errUsd := parseFixedPointString(opts.amountUSD, 18, 2); errUsd == nil && amountUsdStr != "0" && amountUsdStr != "0.00" {
+					value = fmt.Sprintf("%s %s ($%s USD)", amountStr, symbol, amountUsdStr)
 				}
 			}
 			fields = append(fields, &discordgo.MessageEmbedField{Name: "Amount", Value: value, Inline: true})
@@ -736,16 +772,17 @@ func getProjectLink(version string, chainId int, projectId int, handle string) s
 }
 
 type ChainInfo struct {
-	Name        string
-	ShortName   string
-	ExplorerUrl string
+	Name         string
+	ShortName    string
+	ExplorerUrl  string
+	NativeSymbol string
 }
 
 var chains = map[int]ChainInfo{
-	1:     {"Ethereum", "eth", "https://etherscan.io"},
-	10:    {"Optimism", "op", "https://optimistic.etherscan.io"},
-	8453:  {"Base", "base", "https://basescan.org"},
-	42161: {"Arbitrum", "arb", "https://arbiscan.io"},
+	1:     {"Ethereum", "eth", "https://etherscan.io", "ETH"},
+	10:    {"Optimism", "op", "https://optimistic.etherscan.io", "ETH"},
+	8453:  {"Base", "base", "https://basescan.org", "ETH"},
+	42161: {"Arbitrum", "arb", "https://arbiscan.io", "ETH"},
 }
 
 var addressLabels = map[string]string{
@@ -764,6 +801,13 @@ func getChainShortName(chainId int) string {
 		return chain.ShortName
 	}
 	return fmt.Sprintf("chain%d", chainId)
+}
+
+func getNativeTokenSymbol(chainId int) string {
+	if chain, ok := chains[chainId]; ok && chain.NativeSymbol != "" {
+		return chain.NativeSymbol
+	}
+	return "ETH"
 }
 
 func getExplorerUrl(chainId int, path string) string {
